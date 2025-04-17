@@ -361,3 +361,15 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# App Settings
+appsettings.json
+
+# Opus dll
+opus.dll
+
+# Cookies.txt
+cookies.txt
+
+# YT-Dlp
+yt-dlp.exe
