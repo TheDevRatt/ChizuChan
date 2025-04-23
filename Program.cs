@@ -1,4 +1,8 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using ChizuChan.Extensions;
+using ChizuChan.Options;
+using ChizuChan.Services;
+using ChizuChan.Services.Interfaces;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using NetCord.Hosting.Gateway;
@@ -20,7 +24,9 @@ namespace ChizuChan
             })
             .AddGatewayEventHandlers(typeof(Program).Assembly)
             .AddApplicationCommands()
-            .AddComponentInteractions();
+            .AddComponentInteractions()
+            .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
+            .AddAllServicesFromAssembly(typeof(Program).Assembly);
 
             var host = builder.Build()
                 .UseGatewayEventHandlers()
