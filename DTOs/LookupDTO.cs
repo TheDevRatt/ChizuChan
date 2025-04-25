@@ -1,9 +1,7 @@
-﻿using System;
+﻿// Auto-generated DTO based on full API shape with detailed episode tracking
+using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.Text.Json.Serialization;
-using System.Threading.Tasks;
 
 namespace ChizuChan.DTOs
 {
@@ -63,6 +61,12 @@ namespace ChizuChan.DTOs
         [JsonPropertyName("releaseDate")]
         public string ReleaseDate { get; set; }
 
+        [JsonPropertyName("adult")]
+        public bool? Adult { get; set; }
+
+        [JsonPropertyName("video")]
+        public bool? Video { get; set; }
+
         [JsonPropertyName("name")]
         public string Name { get; set; }
 
@@ -74,12 +78,6 @@ namespace ChizuChan.DTOs
 
         [JsonPropertyName("firstAirDate")]
         public string FirstAirDate { get; set; }
-
-        [JsonPropertyName("adult")]
-        public bool? Adult { get; set; }
-
-        [JsonPropertyName("video")]
-        public bool? Video { get; set; }
 
         [JsonPropertyName("profilePath")]
         public string ProfilePath { get; set; }
@@ -107,6 +105,39 @@ namespace ChizuChan.DTOs
 
         [JsonPropertyName("requests")]
         public List<RequestDTO> Requests { get; set; }
+
+        [JsonPropertyName("seasons")]
+        public List<SeasonDTO> Seasons { get; set; }
+
+        [JsonPropertyName("createdAt")]
+        public DateTime CreatedAt { get; set; }
+
+        [JsonPropertyName("updatedAt")]
+        public DateTime UpdatedAt { get; set; }
+
+        [JsonPropertyName("plexUrl")]
+        public string PlexUrl { get; set; }
+    }
+
+    public class SeasonDTO
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("seasonNumber")]
+        public int SeasonNumber { get; set; }
+
+        [JsonPropertyName("status")]
+        public int Status { get; set; }
+
+        [JsonPropertyName("status4k")]
+        public int Status4k { get; set; }
+
+        [JsonPropertyName("episodeCount")]
+        public int EpisodeCount { get; set; }
+
+        [JsonPropertyName("episodeFileCount")]
+        public int EpisodeFileCount { get; set; }
 
         [JsonPropertyName("createdAt")]
         public DateTime CreatedAt { get; set; }

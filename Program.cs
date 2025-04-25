@@ -26,7 +26,8 @@ namespace ChizuChan
             .AddApplicationCommands()
             .AddComponentInteractions()
             .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
-            .AddAllServicesFromAssembly(typeof(Program).Assembly);
+            .AddAllServicesFromAssembly(typeof(Program).Assembly)
+            .AddHttpClient();
 
             var host = builder.Build()
                 .UseGatewayEventHandlers()
