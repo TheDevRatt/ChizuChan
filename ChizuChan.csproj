@@ -6,6 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <UserSecretsId>886ef12b-4d0b-4566-96a0-944d0a3a2a66</UserSecretsId>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- or win-arm64, linux-x64 etc. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <!-- You can change to true later if you want trimming -->
   </PropertyGroup>
 
   <ItemGroup>

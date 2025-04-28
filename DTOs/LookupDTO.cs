@@ -98,7 +98,7 @@ namespace ChizuChan.DTOs
         public int TmdbId { get; set; }
 
         [JsonPropertyName("tvdbId")]
-        public int TvdbId { get; set; }
+        public int? TvdbId { get; set; }
 
         [JsonPropertyName("status")]
         public int Status { get; set; }
@@ -117,6 +117,9 @@ namespace ChizuChan.DTOs
 
         [JsonPropertyName("plexUrl")]
         public string PlexUrl { get; set; }
+
+        [JsonPropertyName("serviceUrl")]
+        public string ServiceUrl { get; set; }
     }
 
     public class SeasonDTO
@@ -180,41 +183,5 @@ namespace ChizuChan.DTOs
 
         [JsonPropertyName("rootFolder")]
         public string RootFolder { get; set; }
-    }
-
-    public class UserDTO
-    {
-        [JsonPropertyName("id")]
-        public int Id { get; set; }
-
-        [JsonPropertyName("email")]
-        public string Email { get; set; }
-
-        [JsonPropertyName("username")]
-        public string Username { get; set; }
-
-        [JsonPropertyName("plexToken")]
-        public string PlexToken { get; set; }
-
-        [JsonPropertyName("plexUsername")]
-        public string PlexUsername { get; set; }
-
-        [JsonPropertyName("userType")]
-        public int UserType { get; set; }
-
-        [JsonPropertyName("permissions")]
-        public int Permissions { get; set; }
-
-        [JsonPropertyName("avatar")]
-        public string Avatar { get; set; }
-
-        [JsonPropertyName("createdAt")]
-        public DateTime CreatedAt { get; set; }
-
-        [JsonPropertyName("updatedAt")]
-        public DateTime UpdatedAt { get; set; }
-
-        [JsonPropertyName("requestCount")]
-        public int RequestCount { get; set; }
     }
 }

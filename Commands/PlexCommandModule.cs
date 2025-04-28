@@ -49,7 +49,15 @@ namespace ChizuChan.Modules
             ulong userId = Context.User.Id;
             int page = 1;
             string apiKey = _apiKeys.OverseerrKey;
-            LookupDTO? result = await _plexService.GetSeriesInfoAsync(query, apiKey, userId, page);
+            StandardResponse<LookupDTO> response = await _plexService.GetSeriesInfoAsync(query, apiKey, userId, page);
+
+            if (response == null)
+            {
+                await ModifyResponseAsync(message => message.Content = $"Response returned with nothing, sorry mate.");
+                return;
+            }
+
+            LookupDTO result = response.Data;
 
             if (result?.Results == null || result.Results.Count == 0)
             {
@@ -70,26 +78,6 @@ namespace ChizuChan.Modules
                 totalPages: totalPages
             );
 
-
-            //var embed = new EmbedProperties
-            //{
-            //    Title = "Test Result",
-            //    Description = "This is a test description to ensure the embed renders correctly.",
-            //    Fields = new[]
-            //    {
-            //        new EmbedFieldProperties
-            //        {
-            //            Name = "Test Field",
-            //            Value = "Valid content here",
-            //            Inline = false
-            //        }
-            //    },
-            //    Footer = new EmbedFooterProperties
-            //    {
-            //        Text = "Result 1 of 1 • Page 1 of 1 • TMDB ID: 12345"
-            //    }
-            //};
-
             try
             {
                 RestMessage responseMessage = await ModifyResponseAsync(message =>
@@ -101,7 +89,7 @@ namespace ChizuChan.Modules
                 ulong messageId = responseMessage.Id;
 
                 // Store the messageId along with other relevant data
-                PlexService.SearchResults[userId] = (result, page, index, messageId, query);
+                PlexService.SearchResults[userId] = (result, page, index, messageId, query, RequestMade: false);
             }
             catch (RestException ex)
             {

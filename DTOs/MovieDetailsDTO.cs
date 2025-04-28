@@ -100,7 +100,10 @@ namespace ChizuChan.DTOs
         public MediaInfoDTO MediaInfo { get; set; }
 
         [JsonPropertyName("watchProviders")]
-        public List<List<WatchProviderDTO>> WatchProviders { get; set; }
+        public List<WatchProviderDTO> WatchProviders { get; set; }
+
+        [JsonPropertyName("keywords")]
+        public List<KeywordDTO> Keywords { get; set; }
     }
 
     public class GenreDTO
@@ -298,10 +301,10 @@ namespace ChizuChan.DTOs
         public string InstagramId { get; set; }
 
         [JsonPropertyName("tvdbId")]
-        public int TvdbId { get; set; }
+        public int? TvdbId { get; set; }
 
         [JsonPropertyName("tvrageId")]
-        public int TvrageId { get; set; }
+        public int? TvrageId { get; set; }
 
         [JsonPropertyName("twitterId")]
         public string TwitterId { get; set; }

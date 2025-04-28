@@ -48,7 +48,7 @@ namespace ChizuChan.Commands.Controllers
         {
             ulong userId = Context.User.Id;
 
-            await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
+            await RespondAsync(InteractionCallback.DeferredMessage());
 
             if (!PlexService.SearchResults.ContainsKey(userId))
             {
@@ -56,12 +56,13 @@ namespace ChizuChan.Commands.Controllers
                 return;
             }
 
-            (LookupDTO Result, int CurrentPage, int CurrentIndex, ulong MessageId, string query) userData = PlexService.SearchResults[userId];
+            (LookupDTO Result, int CurrentPage, int CurrentIndex, ulong MessageId, string Query, bool RequestMade) userData = PlexService.SearchResults[userId];
             LookupDTO resultData = userData.Result;
             int currentPage = userData.CurrentPage;
             int currentIndex = userData.CurrentIndex;
             ulong messageId = userData.MessageId;
-            string query = userData.query;
+            string query = userData.Query;
+            bool requestMade = userData.RequestMade;
 
             List<ResultDTO> results = resultData.Results;
             if (resultData == null || resultData.Results == null || resultData.Results.Count == 0)
@@ -71,17 +72,221 @@ namespace ChizuChan.Commands.Controllers
             }
 
             ResultDTO selectedResult = results[currentIndex];
+            int selectedResultId = results[currentIndex].Id;
 
             if (selectedResult.MediaInfo != null)
             {
-                await ModifyResponseAsync(message => message.Content = $"Ay Buddy, This shows already been downloaded, check it out here:\n{selectedResult.MediaInfo.PlexUrl}");
+                await ModifyResponseAsync(message => message.Content = $"Ay Buddy, This shows already been downloaded, check it out here:\n{selectedResult.MediaInfo.PlexUrl ?? "*No link available, the shows probably downloading*"}");
                 return;
             }
 
-            ModalProperties modal = _embedService.BuildSearchModal(selectedResult, currentIndex, currentPage);
+            if (userData.RequestMade)
+            {
+                await ModifyResponseAsync(message => message.Content = "You already requested this, BOZO.");
+                return;
+            }
 
-            await RespondAsync(InteractionCallback.Modal(modal));
 
+            if (selectedResult.MediaType == "tv")
+            {
+                StandardResponse<TvDetailsDTO> tvResponse = await _plexService.GetTvDetailsAsync(selectedResultId, _apiKeys.OverseerrKey, userId);
+
+                if (tvResponse.Data == null)
+                {
+                    await ModifyResponseAsync(message => message.Content = $"Failed to fetch TV details: {tvResponse.ErrorMessage ?? "Unknown error."}");
+                    return;
+                }
+
+                TvDetailsDTO tvDetails = tvResponse.Data;
+
+                if (tvDetails != null)
+                {
+                    bool isAnime = tvDetails.Keywords.Any(keyword => keyword.Name != null && keyword.Name.ToLower().Contains("anime"));
+                    List<int> seasons = tvDetails.Seasons.Where(season => season.SeasonNumber > 0).Select(season => season.SeasonNumber).ToList();
+
+                    if (isAnime)
+                    {
+                        try
+                        {
+                            RequestMediaDTO request = new RequestMediaDTO
+                            {
+                                MediaType = selectedResult.MediaType,
+                                MediaId = selectedResultId,
+                                TvdbId = tvDetails.ExternalIds.TvdbId,
+                                Seasons = seasons,
+                                Is4K = false,
+                                ServerId = 1,
+                                ProfileId = 7,
+                                RootFolder = "/data/media/anime",
+                                LanguageProfileId = 1,
+                                UserId = 1
+                            };
+
+                            StandardResponse<RequestMediaResultDTO> result = await _plexService.RequestMediaAsync(request, _apiKeys.OverseerrKey);
+
+                            if (result.Data == null)
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Something went wrong trying to request your show: {result.ErrorMessage ?? "Unknown error."}");
+                                return;
+                            }
+                            else if (result != null)
+                            {
+                                PlexService.SearchResults[userId] = (resultData, currentPage, currentIndex, messageId, query, true);
+                                await ModifyResponseAsync(message => message.Content = $"'Kay, I put **{selectedResult.Name ?? selectedResult.Title}** in the queue to be downloaded.");
+                            }
+                            else
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Honestly vro, not even sure what happened, but it fucked up.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await ModifyResponseAsync(message => message.Content = $"Honestly chief, some shii went terribly wrong. Give Blinky a DM and let him know that requests are getting exception errors. Better yet, just show him this:\n{ex.Message}");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            RequestMediaDTO request = new RequestMediaDTO
+                            {
+                                MediaType = selectedResult.MediaType,
+                                MediaId = selectedResultId,
+                                TvdbId = tvDetails.ExternalIds.TvdbId,
+                                Seasons = seasons,
+                                Is4K = false,
+                                ServerId = 0,
+                                ProfileId = 7,
+                                RootFolder = "/data/media/tv",
+                                LanguageProfileId = 1,
+                                UserId = 1
+                            };
+
+
+                            StandardResponse<RequestMediaResultDTO> result = await _plexService.RequestMediaAsync(request, _apiKeys.OverseerrKey);
+
+                            if (result.Data == null)
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Something went wrong trying to request your show: {result.ErrorMessage ?? "Unknown error."}");
+                                return;
+                            }
+                            else if (result != null)
+                            {
+                                PlexService.SearchResults[userId] = (resultData, currentPage, currentIndex, messageId, query, true);
+                                await ModifyResponseAsync(message => message.Content = $"'Kay, I put **{selectedResult.Name ?? selectedResult.Title}** in the queue to be downloaded.");
+                            }
+                            else
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Honestly vro, not even sure what happened, but it fucked up.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await ModifyResponseAsync(message => message.Content = $"Honestly chief, some shii went terribly wrong. Give Blinky a DM and let him know that requests are getting exception errors. Better yet, just show him this:\n{ex.Message}");
+                            return;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                StandardResponse<MovieDetailsDTO> movieResponse = await _plexService.GetMovieDetailsAsync(selectedResultId, _apiKeys.OverseerrKey, userId);
+
+                if (movieResponse.Data == null)
+                {
+                    await ModifyResponseAsync(message => message.Content = $"Failed to fetch Movie details: {movieResponse.ErrorMessage ?? "Unknown error."}");
+                    return;
+                }
+
+                MovieDetailsDTO movieDetails = movieResponse.Data;
+
+                if (movieDetails != null)
+                {
+                    bool isAnime = movieDetails.Keywords.Any(keyword => keyword.Name != null && keyword.Name.ToLower().Contains("anime"));
+
+                    if (isAnime)
+                    {
+                        try
+                        {
+                            RequestMediaDTO request = new RequestMediaDTO
+                            {
+                                MediaType = selectedResult.MediaType,
+                                MediaId = selectedResultId,
+                                TvdbId = movieDetails.ExternalIds.TvdbId,
+                                Is4K = false,
+                                ServerId = 0,
+                                ProfileId = 8,
+                                RootFolder = "/data/media/movies",
+                                UserId = 1,
+                                Tags = new List<int>()
+                            };
+
+                            StandardResponse<RequestMediaResultDTO> result = await _plexService.RequestMediaAsync(request, _apiKeys.OverseerrKey);
+
+                            if (result.Data == null)
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Something went wrong trying to request your show: {result.ErrorMessage ?? "Unknown error."}");
+                                return;
+                            }
+                            else if (result != null)
+                            {
+                                PlexService.SearchResults[userId] = (resultData, currentPage, currentIndex, messageId, query, true);
+                                await ModifyResponseAsync(message => message.Content = $"'Kay, I put **{selectedResult.Name ?? selectedResult.Title}** in the queue to be downloaded.");
+                            }
+                            else
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Honestly vro, not even sure what happened, but it fucked up.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await ModifyResponseAsync(message => message.Content = $"Honestly chief, some shii went terribly wrong. Give Blinky a DM and let him know that requests are getting exception errors. Better yet, just show him this:\n{ex.Message}");
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            RequestMediaDTO request = new RequestMediaDTO
+                            {
+                                MediaType = selectedResult.MediaType,
+                                MediaId = selectedResultId,
+                                TvdbId = movieDetails.ExternalIds.TvdbId,
+                                Is4K = false,
+                                ServerId = 0,
+                                ProfileId = 8,
+                                RootFolder = "/data/media/movies",
+                                UserId = 1
+                            };
+
+
+                            StandardResponse<RequestMediaResultDTO> result = await _plexService.RequestMediaAsync(request, _apiKeys.OverseerrKey);
+
+                            if (result.Data == null)
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Something went wrong trying to request your show: {result.ErrorMessage ?? "Unknown error."}");
+                                return;
+                            }
+                            else if (result != null)
+                            {
+                                PlexService.SearchResults[userId] = (resultData, currentPage, currentIndex, messageId, query, true);
+                                await ModifyResponseAsync(message => message.Content = $"'Kay, I put **{selectedResult.Name ?? selectedResult.Title}** in the queue to be downloaded.");
+                            }
+                            else
+                            {
+                                await ModifyResponseAsync(message => message.Content = $"Honestly vro, not even sure what happened, but it fucked up.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            await ModifyResponseAsync(message => message.Content = $"Honestly chief, some shii went terribly wrong. Give Blinky a DM and let him know that requests are getting exception errors. Better yet, just show him this:\n{ex.Message}");
+                            return;
+                        }
+                    }
+                }
+            }
         }
 
         #region Helper Methods
@@ -95,12 +300,13 @@ namespace ChizuChan.Commands.Controllers
                 return;
             }
 
-            (LookupDTO Result, int CurrentPage, int CurrentIndex, ulong MessageId, string query) userData = PlexService.SearchResults[userId];
+            (LookupDTO Result, int CurrentPage, int CurrentIndex, ulong MessageId, string Query, bool RequestMade) userData = PlexService.SearchResults[userId];
             LookupDTO resultData = userData.Result;
             int currentPage = userData.CurrentPage;
             int currentIndex = userData.CurrentIndex;
             ulong messageId = userData.MessageId;
-            string query = userData.query;
+            string query = userData.Query;
+            bool requestMade = userData.RequestMade;
 
             if (resultData == null || resultData.Results == null || resultData.Results.Count == 0)
             {
@@ -119,13 +325,21 @@ namespace ChizuChan.Commands.Controllers
                 if (newIndex >= totalResults && currentPage < resultData.TotalPages)
                 {
                     currentPage++;
-                    LookupDTO? nextPageResult = await _plexService.GetSeriesInfoAsync(
+                    StandardResponse<LookupDTO> nextPage = await _plexService.GetSeriesInfoAsync(
                         query,
                         _apiKeys.OverseerrKey,
                         userId,
                         currentPage,
                         messageId
                     );
+
+                    if (nextPage.Data == null)
+                    {
+                        await ModifyResponseAsync(message => message.Content = $"There is no content left on the next page.");
+                        return;
+                    }
+
+                    LookupDTO nextPageResult = nextPage.Data;
 
                     if (nextPageResult == null || nextPageResult.Results == null || nextPageResult.Results.Count == 0)
                     {
@@ -136,6 +350,7 @@ namespace ChizuChan.Commands.Controllers
                     resultData = nextPageResult;
                     results = resultData.Results;
                     newIndex = 0;
+                    requestMade = false;
                 }
                 else if (newIndex >= totalResults)
                 {
@@ -149,13 +364,21 @@ namespace ChizuChan.Commands.Controllers
                 if (newIndex < 0 && currentPage > 1)
                 {
                     currentPage--;
-                    LookupDTO? prevPageResult = await _plexService.GetSeriesInfoAsync(
+                    StandardResponse<LookupDTO> prevPage = await _plexService.GetSeriesInfoAsync(
                         query,
                         _apiKeys.OverseerrKey,
                         userId,
                         currentPage,
                         messageId
                     );
+
+                    if (prevPage.Data == null)
+                    {
+                        await ModifyResponseAsync(message => message.Content = $"There is no content on the previous page.");
+                        return;
+                    }
+
+                    LookupDTO prevPageResult = prevPage.Data;
 
                     if (prevPageResult == null || prevPageResult.Results == null || prevPageResult.Results.Count == 0)
                     {
@@ -166,6 +389,7 @@ namespace ChizuChan.Commands.Controllers
                     resultData = prevPageResult;
                     results = resultData.Results;
                     newIndex = results.Count - 1;
+                    requestMade = false;
                 }
                 else if (newIndex < 0)
                 {
@@ -183,7 +407,7 @@ namespace ChizuChan.Commands.Controllers
                 totalPages: resultData.TotalPages
             );
 
-            PlexService.SearchResults[userId] = (resultData, currentPage, newIndex, messageId, query);
+            PlexService.SearchResults[userId] = (resultData, currentPage, newIndex, messageId, query, requestMade);
 
             await RespondAsync(InteractionCallback.DeferredModifyMessage);
 

@@ -66,7 +66,7 @@ namespace ChizuChan.Services
                 Fields = fields.ToArray(),
                 Footer = new EmbedFooterProperties
                 {
-                    Text = $"Result {index + 1} of {total}\t•\tPage {page} of {totalPages}\t•\t{idLabel}: {tmdbId}"
+                    Text = $"Result {index + 1} of {total}  •  Page {page} of {totalPages}  •  {idLabel}: {tmdbId}"
                 }
             };
 
