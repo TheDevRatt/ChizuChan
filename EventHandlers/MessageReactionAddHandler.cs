@@ -14,7 +14,8 @@ namespace ChizuChan.EventHandlers
     {
         public async ValueTask HandleAsync(MessageReactionAddEventArgs args)
         {
-            await client.SendMessageAsync(args.ChannelId, $"<@{args.UserId}> reacted with {args.Emoji.Name}!");
+            //await client.SendMessageAsync(args.ChannelId, $"<@{args.UserId}> reacted with {args.Emoji.Name}!");
+            Console.WriteLine($"<@{args.UserId}> reacted with {args.Emoji.Name} in channel {args.ChannelId}!");
         }
     }
 }

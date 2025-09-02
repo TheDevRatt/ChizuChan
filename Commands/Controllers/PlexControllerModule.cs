@@ -157,7 +157,7 @@ namespace ChizuChan.Commands.Controllers
                                 Seasons = seasons,
                                 Is4K = false,
                                 ServerId = 0,
-                                ProfileId = 7,
+                                ProfileId = 8,
                                 RootFolder = "/data/media/tv",
                                 LanguageProfileId = 1,
                                 UserId = 1
