@@ -18,6 +18,11 @@ namespace ChizuChan.DTOs
 
         [JsonPropertyName("results")]
         public List<ResultDTO> Results { get; set; }
+
+        public static implicit operator LookupDTO(StandardResponse<LookupDTO> v)
+        {
+            throw new NotImplementedException();
+        }
     }
 
     public class ResultDTO

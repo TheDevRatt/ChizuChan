@@ -1,4 +1,5 @@
 ﻿using ChizuChan.DTOs;
+using NetCord;
 using NetCord.Rest;
 using System;
 using System.Collections.Generic;
@@ -12,5 +13,9 @@ namespace ChizuChan.Services.Interfaces
     {
         (EmbedProperties Embed, IComponentProperties[] Components) BuildSearchEmbed(ResultDTO record, int index, int total, int page, int totalPages);
         ModalProperties BuildSearchModal(ResultDTO record, int index, int page);
+
+        // NEW: Music embeds
+        (EmbedProperties Embed, IComponentProperties[] Components) BuildMusicPlayerEmbed(string title, string? sourceUrl, User requestedBy, bool isPaused, bool canSkip, TimeSpan? position = null, TimeSpan? duration = null, string? thumbnailUrl = null);
+        EmbedProperties BuildQueuedConfirmationEmbed(string displayTitle, string? sourceUrl, User requestedBy);
     }
 }

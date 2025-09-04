@@ -106,5 +106,61 @@ namespace ChizuChan.Services
 
             return modal;
         }
+
+        public (EmbedProperties Embed, IComponentProperties[] Components) BuildMusicPlayerEmbed(string title, string? sourceUrl, User requestedBy, bool isPaused, bool canSkip, TimeSpan? position = null, TimeSpan? duration = null, string? thumbnailUrl = null)
+        {
+            string safeTitle = string.IsNullOrWhiteSpace(title) ? "Now Playing" : title;
+            string desc = sourceUrl is not null ? $"Source: {sourceUrl}" : string.Empty;
+
+            // Optional Time Line
+            string timeline = string.Empty;
+            if (position.HasValue || duration.HasValue)
+            {
+                string pos = position.HasValue ? FormatTime(position.Value) : "--:--";
+                string dur = duration.HasValue ? FormatTime(duration.Value) : "--:--";
+                timeline = $"\n\nTime: {pos} / {dur}";
+            }
+
+            var embed = new EmbedProperties
+            {
+                Title = safeTitle.Length > 256 ? safeTitle[..256] : safeTitle,
+                Description = (desc + timeline).Trim(),
+                Thumbnail = thumbnailUrl is null ? null : new EmbedThumbnailProperties(thumbnailUrl),
+                Color = new Color(0x5865F2),
+                Footer = new EmbedFooterProperties { Text = $"Requested by {requestedBy.Username}" }
+            };
+
+            // Row with four explicit controls. Toggle disabled pair based on paused status
+            var row = new ActionRowProperties
+            {
+                new ButtonProperties("music_skip", "Skip", ButtonStyle.Primary) { Disabled = !canSkip }, // <-- toggle
+                new ButtonProperties("music_pause", "Pause", ButtonStyle.Secondary) { Disabled = isPaused },
+                new ButtonProperties("music_resume", "Resume", ButtonStyle.Secondary) { Disabled = !isPaused },
+                new ButtonProperties("music_stop", "Stop", ButtonStyle.Danger),
+            };
+
+            return (embed, new IComponentProperties[] { row });
+        }
+
+        public EmbedProperties BuildQueuedConfirmationEmbed(string displayTitle, string? sourceUrl, User requestedBy)
+        {
+            bool titleIsUrl = !string.IsNullOrWhiteSpace(sourceUrl) &&
+                              string.Equals(displayTitle, sourceUrl, StringComparison.OrdinalIgnoreCase);
+
+            string description = titleIsUrl
+                ? sourceUrl!                 
+                : (sourceUrl is null ? displayTitle : $"{displayTitle}\n{sourceUrl}");
+
+            return new EmbedProperties
+            {
+                Title = "Queued",
+                Description = description,
+                Color = new Color(0x57F287),
+                Footer = new EmbedFooterProperties { Text = $"Requested by {requestedBy.Username}" }
+            };
+        }
+
+        private static string FormatTime(TimeSpan ts)
+            => $"{(int)ts.TotalMinutes:00}:{ts.Seconds:00}";
     }
 }
