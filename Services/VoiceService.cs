@@ -41,7 +41,9 @@ namespace ChizuChan.Services
                 onError: ex => PlaybackError?.Invoke(g, ex)));
 
             // Let caller own the gateway join; we only accept the adapter and attach.
+            _logger.LogInformation("[VoiceService] JoinAsync: invoking connect delegate for guild={GuildId}", guildId);
             IVoiceConnectionAdapter adapter = await connect(ct);
+            _logger.LogInformation("[VoiceService] JoinAsync: connect delegate returned, attaching adapter for guild={GuildId}", guildId);
             return await actor.AttachAsync(adapter, ct);
         }
 
@@ -340,6 +342,7 @@ namespace ChizuChan.Services
             private async Task RunPlaybackLoopAsync()
             {
                 var sessionCt = _lifects.Token;
+                _log.LogInformation("[{Guild}] PlaybackLoop started", _guildId);
 
                 try
                 {
@@ -347,6 +350,7 @@ namespace ChizuChan.Services
                     {
                         if (_conn is null || !_conn.IsConnected)
                         {
+                            _log.LogInformation("[{Guild}] PlaybackLoop: _conn is null or disconnected, waiting 200ms...", _guildId);
                             await Task.Delay(200, sessionCt).ConfigureAwait(false);
                             continue;
                         }

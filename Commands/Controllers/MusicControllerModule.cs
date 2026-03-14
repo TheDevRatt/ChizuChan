@@ -73,7 +73,7 @@ namespace ChizuChan.Commands.Controllers
                 {
                     m.Content = "Skipped.";
                     m.Embeds = Array.Empty<EmbedProperties>();
-                    m.Components = Array.Empty<IComponentProperties>();
+                    m.Components = Array.Empty<IMessageComponentProperties>();
                 });
             });
 
@@ -119,7 +119,7 @@ namespace ChizuChan.Commands.Controllers
                         {
                             m.Content = "Stopped.";
                             m.Embeds = Array.Empty<EmbedProperties>();
-                            m.Components = Array.Empty<IComponentProperties>();
+                            m.Components = Array.Empty<IMessageComponentProperties>();
                         });
                     _ui.ClearNowPlayingMessage(guildId);
                 }
@@ -184,7 +184,7 @@ namespace ChizuChan.Commands.Controllers
                 {
                     m.Content = "Nothing is playing.";
                     m.Embeds = Array.Empty<EmbedProperties>();
-                    m.Components = Array.Empty<IComponentProperties>();
+                    m.Components = Array.Empty<IMessageComponentProperties>();
                 });
                 return;
             }
@@ -208,16 +208,11 @@ namespace ChizuChan.Commands.Controllers
                 thumbnailUrl: current.ThumbnailUrl,
                 canSkip: canSkip);
 
-            // Normalize components to the exact type REST expects
-            IComponentProperties[] components =
-                comps as IComponentProperties[] ??
-                (comps is IEnumerable<IComponentProperties> e ? e.ToArray() : Array.Empty<IComponentProperties>());
-
             await _restClient.ModifyMessageAsync(msgRef.ChannelId, msgRef.MessageId, m =>
             {
                 m.Content = null;
                 m.Embeds = new[] { embed };
-                m.Components = components;
+                m.Components = comps;
             });
         }
 

@@ -41,7 +41,7 @@ namespace ChizuChan
                     Activities = [new UserActivityProperties("/play", UserActivityType.Listening)]
                 };
             })
-            .AddGatewayEventHandlers(typeof(Program).Assembly)
+            .AddGatewayHandlers(typeof(Program).Assembly)
             .AddApplicationCommands()
             .AddComponentInteractions()
             .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
@@ -53,7 +53,6 @@ namespace ChizuChan
             builder.Services.AddHostedService<StatusRotatorService>();
 
             var host = builder.Build()
-                .UseGatewayEventHandlers()
                 .AddModules(typeof(Program).Assembly);
 
             await host.RunAsync();

@@ -9,8 +9,7 @@ using System.Threading.Tasks;
 
 namespace ChizuChan.EventHandlers
 {
-    [GatewayEvent(nameof(GatewayClient.MessageReactionAdd))]
-    public class MessageReactionAddHandler(RestClient client) : IGatewayEventHandler<MessageReactionAddEventArgs>
+    public class MessageReactionAddHandler(RestClient client) : IMessageReactionAddGatewayHandler
     {
         public async ValueTask HandleAsync(MessageReactionAddEventArgs args)
         {

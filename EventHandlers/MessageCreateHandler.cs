@@ -9,8 +9,7 @@ using System.Threading.Tasks;
 
 namespace ChizuChan.EventHandlers
 {
-    [GatewayEvent(nameof(GatewayClient.MessageCreate))]
-    public class MessageCreateHandler(ILogger<MessageCreateHandler> logger) : IGatewayEventHandler<Message>
+    public class MessageCreateHandler(ILogger<MessageCreateHandler> logger) : IMessageCreateGatewayHandler
     {
         public ValueTask HandleAsync(Message message)
         {

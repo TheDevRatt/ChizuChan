@@ -19,7 +19,7 @@ namespace ChizuChan.Services
             _plexService = plexService;
         }
 
-        public (EmbedProperties Embed, IComponentProperties[] Components) BuildSearchEmbed(ResultDTO record, int index, int total, int page = 1, int totalPages = 1)
+        public (EmbedProperties Embed, IMessageComponentProperties[] Components) BuildSearchEmbed(ResultDTO record, int index, int total, int page = 1, int totalPages = 1)
         {
             if (record == null)
                 throw new ArgumentNullException(nameof(record));
@@ -70,7 +70,7 @@ namespace ChizuChan.Services
                 }
             };
 
-            IComponentProperties[] components = new IComponentProperties[]
+            IMessageComponentProperties[] components = new IMessageComponentProperties[]
             {
                 new ActionRowProperties
                 {
@@ -92,7 +92,7 @@ namespace ChizuChan.Services
             string customId = $"search_modal_{record.Id}_{index}_{page}";
             string title = $"Details for: {record.Title ?? record.Name ?? "Unknown"}";
 
-            List<IComponentProperties> components = new List<IComponentProperties>
+            List<IModalComponentProperties> components = new List<IModalComponentProperties>
             {
                 new TextDisplayProperties($"{record.Title} ?? {record.Name} ?? 'N/A''"),
                 new TextDisplayProperties($"{record.Overview} ?? 'No overview available''")
@@ -107,7 +107,7 @@ namespace ChizuChan.Services
             return modal;
         }
 
-        public (EmbedProperties Embed, IComponentProperties[] Components) BuildMusicPlayerEmbed(string title, string? sourceUrl, User requestedBy, bool isPaused, bool canSkip, TimeSpan? position = null, TimeSpan? duration = null, string? thumbnailUrl = null)
+        public (EmbedProperties Embed, IMessageComponentProperties[] Components) BuildMusicPlayerEmbed(string title, string? sourceUrl, User requestedBy, bool isPaused, bool canSkip, TimeSpan? position = null, TimeSpan? duration = null, string? thumbnailUrl = null)
         {
             string safeTitle = string.IsNullOrWhiteSpace(title) ? "Now Playing" : title;
             string desc = sourceUrl is not null ? $"Source: {sourceUrl}" : string.Empty;
@@ -139,7 +139,7 @@ namespace ChizuChan.Services
                 new ButtonProperties("music_stop", "Stop", ButtonStyle.Danger),
             };
 
-            return (embed, new IComponentProperties[] { row });
+            return (embed, new IMessageComponentProperties[] { row });
         }
 
         public EmbedProperties BuildQueuedConfirmationEmbed(string displayTitle, string? sourceUrl, User requestedBy)

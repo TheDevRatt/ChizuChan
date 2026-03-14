@@ -399,7 +399,7 @@ namespace ChizuChan.Commands.Controllers
 
             ResultDTO selectedResult = results[newIndex];
 
-            (EmbedProperties Embed, IComponentProperties[] Components) rebuilt = _embedService.BuildSearchEmbed(
+            (EmbedProperties Embed, IMessageComponentProperties[] Components) rebuilt = _embedService.BuildSearchEmbed(
                 record: selectedResult,
                 index: newIndex,
                 total: results.Count,
