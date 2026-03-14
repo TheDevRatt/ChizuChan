@@ -1,35 +1,35 @@
-﻿using ChizuChan.Adapters;
+using ChizuChan.Adapters;
 using ChizuChan.Services.Interfaces;
 using ChizuChan.Services.Media;
 using Microsoft.Extensions.Logging;
 using NetCord;
 using NetCord.Gateway;
 using NetCord.Gateway.Voice;
+using NetCord.Logging;
 using NetCord.Rest;
 using NetCord.Services.ApplicationCommands;
 using System;
+using System.IO;
 using System.Threading.Tasks;
 using static ChizuChan.Services.Interfaces.Track;
-using static ChizuChan.Services.Media.YtDlpFfmpeg;
-using NetCord.Logging;
 
 namespace ChizuChan.Commands
 {
-    public class MusicCommandModule : ApplicationCommandModule<ApplicationCommandContext>
+    public class PlayLocalCommandModule : ApplicationCommandModule<ApplicationCommandContext>
     {
         private readonly IVoiceService _voiceService;
         private readonly IGuildService _guildService;
         private readonly IEmbedService _embedService;
-        private readonly ILogger<MusicCommandModule> _logger;
+        private readonly ILogger<PlayLocalCommandModule> _logger;
         private readonly GatewayClient _gatewayClient;
         private readonly IMusicUiState _uiState;
         private readonly RestClient _restClient;
 
-        public MusicCommandModule(
+        public PlayLocalCommandModule(
             IVoiceService voiceService,
             IGuildService guildService,
             IEmbedService embedService,
-            ILogger<MusicCommandModule> logger,
+            ILogger<PlayLocalCommandModule> logger,
             GatewayClient gatewayClient,
             RestClient restClient,
             IMusicUiState uiState)
@@ -43,44 +43,54 @@ namespace ChizuChan.Commands
             _restClient = restClient;
         }
 
-        [SlashCommand("play", "Plays a YouTube (or direct) audio URL.", Contexts = [InteractionContextType.Guild])]
-        public async Task PlayAsync(string url)
+        [SlashCommand("playlocal", "Plays a local audio file from the host machine.", Contexts = [InteractionContextType.Guild])]
+        public async Task PlayLocalAsync(
+            [SlashCommandParameter(Name = "path", Description = "Absolute path to the audio file on the host machine.")]
+            string filePath)
         {
-            // Make the interaction response ephemeral so “queued” confirmations stay private
             await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
 
-            Guild guild = _guildService.GetGuild(Context.Guild!.Id) ?? Context.Guild!;
-            _guildService.AddOrUpdateGuild(guild);
-
-            if (!Uri.TryCreate(url, UriKind.Absolute, out _))
+            if (!File.Exists(filePath))
             {
-                await ModifyResponseAsync(m => m.Content = "Please provide a valid absolute URL.");
+                await ModifyResponseAsync(m => m.Content = $"File not found: `{filePath}`");
                 return;
             }
 
-            // NEW (fresh from gateway cache; requires GuildVoiceStates intent)
+            // Restrict to audio file extensions as a basic safety check
+            string ext = Path.GetExtension(filePath).ToLowerInvariant();
+            string[] allowedExtensions = [".mp3", ".flac", ".wav", ".ogg", ".aac", ".m4a", ".opus", ".wma", ".mp4", ".mkv", ".webm"];
+            if (Array.IndexOf(allowedExtensions, ext) == -1)
+            {
+                await ModifyResponseAsync(m => m.Content = $"Unsupported file type `{ext}`. Supported: {string.Join(", ", allowedExtensions)}");
+                return;
+            }
+
             ulong guildId = Context.Guild!.Id;
             ulong userId = Context.User.Id;
 
+            Guild guild = _guildService.GetGuild(guildId) ?? Context.Guild!;
+            _guildService.AddOrUpdateGuild(guild);
+
+            // Resolve the voice channel the user is in
+            ulong voiceChannelId;
             if (_gatewayClient.Cache.Guilds.TryGetValue(guildId, out var cachedGuild) &&
                 cachedGuild.VoiceStates.TryGetValue(userId, out var vs) &&
-                vs.ChannelId is ulong voiceChannelId)
+                vs.ChannelId is ulong vcId)
             {
-                // voiceChannelId is ready to use
+                voiceChannelId = vcId;
             }
             else
             {
-                // LAST RESORT: fall back to the interaction snapshot if cache not populated yet
                 var snap = _guildService.GetGuild(guildId) ?? Context.Guild!;
-                if (!(snap.VoiceStates.TryGetValue(userId, out var vsSnap) && vsSnap.ChannelId is ulong voiceChannelId2))
+                if (!(snap.VoiceStates.TryGetValue(userId, out var vsSnap) && vsSnap.ChannelId is ulong vcId2))
                 {
                     await ModifyResponseAsync(m => m.Content = "Join a voice channel first.");
                     return;
                 }
-                voiceChannelId = voiceChannelId2;
+                voiceChannelId = vcId2;
             }
 
-            // Optional: ensure the channel still has at least one non-bot user (defensive)
+            // Ensure channel has at least one non-bot user
             bool channelHasSomeone =
                 _gatewayClient.Cache.Guilds.TryGetValue(guildId, out var g) &&
                 g.VoiceStates.Values.Any(s => s.ChannelId == voiceChannelId && s.UserId != _gatewayClient.Id);
@@ -91,8 +101,8 @@ namespace ChizuChan.Commands
                 return;
             }
 
+            // Block if bot is already in a different channel
             ulong botId = _gatewayClient.Id;
-
             if (_gatewayClient.Cache.Guilds.TryGetValue(guildId, out var g2) &&
                 g2.VoiceStates.TryGetValue(botId, out var botVs) &&
                 botVs.ChannelId is ulong botChannelId &&
@@ -102,31 +112,21 @@ namespace ChizuChan.Commands
                 return;
             }
 
-            // BEFORE you join:
-            var preSnap = await _voiceService.GetSnapshotAsync(guild.Id);
+            var preSnap = await _voiceService.GetSnapshotAsync(guildId);
 
-            // Only join if not already connected in this guild
             if (!preSnap.IsConnected)
             {
                 bool joined = await _voiceService.JoinAsync(
-                    guildId: guild.Id,
+                    guildId: guildId,
                     voiceChannelId: voiceChannelId,
                     connect: async (ct) =>
                     {
-                        _logger.LogInformation("[Connect] Calling JoinVoiceChannelAsync guild={GuildId} channel={ChannelId}", guild.Id, voiceChannelId);
+                        _logger.LogInformation("[Connect] Calling JoinVoiceChannelAsync guild={GuildId} channel={ChannelId}", guildId, voiceChannelId);
                         var vcConfig = new VoiceClientConfiguration
                         {
                             Logger = new MicrosoftLoggerVoiceAdapter(_logger),
                         };
-                        VoiceClient vc = await _gatewayClient.JoinVoiceChannelAsync(guild.Id, voiceChannelId, vcConfig);
-
-                        // Hook all lifecycle events so we can see exactly what fires (and what doesn't).
-                        vc.Connecting += () => { _logger.LogInformation("[VoiceLifecycle] Connecting fired"); return default; };
-                        vc.Connect    += () => { _logger.LogInformation("[VoiceLifecycle] Connect fired"); return default; };
-                        vc.Ready      += () => { _logger.LogInformation("[VoiceLifecycle] Ready fired"); return default; };
-                        vc.Disconnect += s  => { _logger.LogWarning("[VoiceLifecycle] Disconnect fired status={Status}", s); return default; };
-                        vc.Close      += () => { _logger.LogWarning("[VoiceLifecycle] Close fired"); return default; };
-
+                        VoiceClient vc = await _gatewayClient.JoinVoiceChannelAsync(guildId, voiceChannelId, vcConfig);
                         _logger.LogInformation("[Connect] Calling vc.StartAsync...");
                         await vc.StartAsync(ct);
                         _logger.LogInformation("[Connect] vc.StartAsync returned, handing off to adapter (readiness polled in OpenPcmSinkAsync).");
@@ -141,50 +141,42 @@ namespace ChizuChan.Commands
             }
 
             bool wasIdle = preSnap.Current is null;
+            string displayTitle = Path.GetFileNameWithoutExtension(filePath);
 
-            // Resolve metadata (title/thumbnail/duration)
-            YtDlpFfmpeg.MediaMeta meta;
-            try { meta = await YtDlpFfmpeg.ResolveMetadataAsync(url, CancellationToken.None); }
-            catch { meta = new(null, null, null); }
-
-            var track = new Track(meta.Title ?? url, TrackSourceType.StreamFactory)
+            var track = new Track(displayTitle, TrackSourceType.StreamFactory)
             {
                 RequestedByUserId = Context.User.Id,
-                StreamFactory = ct => YtDlpFfmpeg.OpenPcmFromUrlAsync(url, ct),
-                Duration = meta.Duration,
-                ThumbnailUrl = meta.Thumbnail,   // ⬅️ add this property to Track (see section C)
-                Url = url,              // keep source for embeds
+                StreamFactory = ct => YtDlpFfmpeg.OpenPcmFromFileAsync(filePath, ct),
             };
 
-            await _voiceService.EnqueueAsync(guild.Id, track);
+            await _voiceService.EnqueueAsync(guildId, track);
 
             if (wasIdle)
             {
-                var snapAfter = await _voiceService.GetSnapshotAsync(guild.Id);
+                var snapAfter = await _voiceService.GetSnapshotAsync(guildId);
 
                 var (embed, components) = _embedService.BuildMusicPlayerEmbed(
-                    title: meta.Title ?? "Now Playing",
-                    sourceUrl: url,
+                    title: displayTitle,
+                    sourceUrl: null,
                     requestedBy: Context.User,
                     isPaused: false,
                     canSkip: snapAfter.CanSkip,
                     position: TimeSpan.Zero,
-                    duration: meta.Duration,
-                    thumbnailUrl: meta.Thumbnail);
+                    duration: null,
+                    thumbnailUrl: null);
 
                 RestMessage publicMsg = await _restClient.SendMessageAsync(
                     Context.Channel.Id,
                     new MessageProperties { Content = null, Embeds = new[] { embed }, Components = components });
 
-                _uiState.SetNowPlayingMessage(guild.Id, publicMsg.ChannelId, publicMsg.Id);
+                _uiState.SetNowPlayingMessage(guildId, publicMsg.ChannelId, publicMsg.Id);
                 await ModifyResponseAsync(m => m.Content = "Started playback.");
             }
             else
             {
-                // 1) Send the ephemeral “queued” confirmation
                 var queued = _embedService.BuildQueuedConfirmationEmbed(
-                    displayTitle: meta.Title ?? "Queued track",
-                    sourceUrl: url,
+                    displayTitle: displayTitle,
+                    sourceUrl: null,
                     requestedBy: Context.User);
 
                 await ModifyResponseAsync(m =>
@@ -194,27 +186,25 @@ namespace ChizuChan.Commands
                     m.Components = Array.Empty<IMessageComponentProperties>();
                 });
 
-                // 2) If we already have a public Now Playing message, refresh it so Skip becomes enabled
-                if (_uiState.TryGetNowPlayingMessage(guild.Id, out var msgRef))
+                if (_uiState.TryGetNowPlayingMessage(guildId, out var msgRef))
                 {
-                    var snap = await _voiceService.GetSnapshotAsync(guild.Id);
+                    var snap = await _voiceService.GetSnapshotAsync(guildId);
                     if (snap.Current is not null)
                     {
-                        // Best-effort: show the original requester of the *current* track
                         User requestedBy = Context.User;
                         if (snap.Current.RequestedByUserId is ulong uid)
                         {
                             try { requestedBy = await _restClient.GetUserAsync(uid); } catch { }
                         }
 
-                        var pos = await _voiceService.GetPositionAsync(guild.Id);
+                        var pos = await _voiceService.GetPositionAsync(guildId);
 
                         var (embed, components) = _embedService.BuildMusicPlayerEmbed(
                             title: snap.Current.Title ?? "Now Playing",
                             sourceUrl: snap.Current.Url,
                             requestedBy: requestedBy,
                             isPaused: snap.IsPaused,
-                            canSkip: snap.CanSkip,                 // <-- this flips Skip to enabled
+                            canSkip: snap.CanSkip,
                             position: pos,
                             duration: snap.Current.Duration,
                             thumbnailUrl: snap.Current.ThumbnailUrl);

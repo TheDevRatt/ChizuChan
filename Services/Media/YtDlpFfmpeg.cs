@@ -110,8 +110,49 @@ namespace ChizuChan.Services.Media
             });
 
             return new TwoProcessOutStream(pYt, pFf, reg);
+        }
 
-            return new TwoProcessOutStream(pYt, pFf, reg);
+        /// <summary>
+        /// Transcodes a local audio file to PCM s16le/48k/stereo via ffmpeg and returns a readable stream.
+        /// </summary>
+        public static Task<Stream> OpenPcmFromFileAsync(string filePath, CancellationToken ct)
+        {
+            string ff = ResolveExeOrThrow("ffmpeg.exe", "ffmpeg", "ffmpeg.exe");
+
+            var pFf = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = ff,
+                    Arguments = $"-hide_banner -loglevel error -i \"{filePath}\" -f s16le -ar 48000 -ac 2 pipe:1",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = AppContext.BaseDirectory,
+                },
+                EnableRaisingEvents = true,
+            };
+
+            try
+            {
+                if (!pFf.Start())
+                    throw new InvalidOperationException("Failed to start ffmpeg.");
+                Console.Error.WriteLine($"[ffmpeg] pid={pFf.Id} (file={filePath}, stdout->PCM)");
+            }
+            catch (System.ComponentModel.Win32Exception ex)
+            {
+                throw new FileNotFoundException($"Process start failed. ffmpeg: \"{ff}\". {ex.Message}", ex);
+            }
+
+            // Dummy "yt" placeholder — reuse TwoProcessOutStream with pFf acting as both.
+            // We create a no-op sentinel process wrapper by just passing pFf twice.
+            var reg = ct.Register(() =>
+            {
+                try { if (!pFf.HasExited) pFf.Kill(entireProcessTree: true); } catch { }
+            });
+
+            return Task.FromResult<Stream>(new SingleProcessOutStream(pFf, reg));
         }
 
         // --- Helpers ---------------------------------------------------------
@@ -242,6 +283,84 @@ namespace ChizuChan.Services.Media
                 await base.DisposeAsync();
             }
 #endif
+        }
+
+        /// <summary>
+        /// Wraps a single ffmpeg stdout stream and owns the process.
+        /// </summary>
+        public sealed class SingleProcessOutStream : Stream
+        {
+            private readonly Process _pFf;
+            private readonly IDisposable _reg;
+            private readonly Stream _inner;
+            private volatile bool _killed;
+
+            public SingleProcessOutStream(Process pFf, IDisposable reg)
+            {
+                _pFf = pFf;
+                _reg = reg;
+                _inner = pFf.StandardOutput.BaseStream;
+            }
+
+            public override bool CanRead => _inner.CanRead;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override void Flush() => _inner.Flush();
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                try { return _inner.Read(buffer, offset, count); }
+                catch (System.ComponentModel.Win32Exception) when (_killed) { return 0; }
+                catch (IOException) when (_killed) { return 0; }
+            }
+
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+                => ReadAsyncCore(buffer, offset, count, ct);
+
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+                => ReadAsyncCore(buffer, ct);
+
+            private async Task<int> ReadAsyncCore(byte[] buffer, int offset, int count, CancellationToken ct)
+            {
+                try { return await _inner.ReadAsync(buffer, offset, count, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+                catch (System.ComponentModel.Win32Exception) when (_killed) { return 0; }
+                catch (IOException) when (_killed) { return 0; }
+            }
+
+            private async ValueTask<int> ReadAsyncCore(Memory<byte> buffer, CancellationToken ct)
+            {
+                try { return await _inner.ReadAsync(buffer, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+                catch (System.ComponentModel.Win32Exception) when (_killed) { return 0; }
+                catch (IOException) when (_killed) { return 0; }
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                _killed = true;
+                try { _inner.Dispose(); } catch { }
+                try { if (!_pFf.HasExited) _pFf.Kill(entireProcessTree: true); } catch { }
+                try { _reg.Dispose(); } catch { }
+                try { _pFf.Dispose(); } catch { }
+                base.Dispose(disposing);
+            }
+
+            public override async ValueTask DisposeAsync()
+            {
+                _killed = true;
+                try { await _inner.DisposeAsync(); } catch { }
+                try { if (!_pFf.HasExited) _pFf.Kill(entireProcessTree: true); } catch { }
+                try { _reg.Dispose(); } catch { }
+                try { _pFf.Dispose(); } catch { }
+                await base.DisposeAsync();
+            }
         }
 
         public sealed record MediaMeta(string? Title, string? Thumbnail, TimeSpan? Duration);

@@ -70,7 +70,7 @@ namespace ChizuChan.Modules
             int total = result.Results.Count;
             int totalPages = result.TotalPages;
 
-            (EmbedProperties embed, IComponentProperties[] components) = _embedService.BuildSearchEmbed(
+            (EmbedProperties embed, IMessageComponentProperties[] components) = _embedService.BuildSearchEmbed(
                 record: firstResult,
                 index: index,
                 total: total,

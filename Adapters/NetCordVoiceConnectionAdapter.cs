@@ -35,18 +35,41 @@ namespace ChizuChan.Adapters
             if (_disposed)
                 throw new ObjectDisposedException(nameof(NetCordVoiceConnectionAdapter));
 
-            // Optional: advertise speaking before sending audio. This exists on VoiceClient.
-            await _voiceClient.EnterSpeakingStateAsync(SpeakingFlags.Microphone);
+            // The voice WebSocket handshake (UDP IP discovery + session description) may still
+            // be in progress when this is called. Poll until the connection accepts payloads,
+            // up to 15 seconds.
+            const int maxAttempts = 75;   // 75 × 200 ms = 15 s
+            const int delayMs = 200;
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    _logger.LogInformation("[Adapter] OpenPcmSinkAsync: attempt {Attempt}/{Max} – calling EnterSpeakingStateAsync...", attempt, maxAttempts);
+                    await _voiceClient.EnterSpeakingStateAsync(new SpeakingProperties(SpeakingFlags.Microphone));
+                    _logger.LogInformation("[Adapter] OpenPcmSinkAsync: EnterSpeakingStateAsync succeeded on attempt {Attempt}.", attempt);
+                    break;  // success – exit poll loop
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("not started") || ex.Message.Contains("not connected"))
+                {
+                    _logger.LogInformation("[Adapter] OpenPcmSinkAsync: voice WS not ready yet (attempt {Attempt}), retrying in {Delay} ms...", attempt, delayMs);
+                    if (attempt == maxAttempts)
+                        throw new TimeoutException("Voice WebSocket did not become ready within 15 seconds.", ex);
+                    await Task.Delay(delayMs, ct);
+                }
+            }
 
-            Stream rtpOut = _voiceClient.CreateOutputStream();
+            _logger.LogInformation("[Adapter] OpenPcmSinkAsync: calling CreateVoiceStream...");
+            Stream rtpOut = _voiceClient.CreateVoiceStream();
+            _logger.LogInformation("[Adapter] OpenPcmSinkAsync: CreateVoiceStream done, wrapping with OpusEncodeStream...");
 
-            // Encode PCM -> Opus and write to VoiceClient's RTP stream.
             OpusEncodeStream opus = new OpusEncodeStream(
                 rtpOut,
                 PcmFormat.Short,          // s16le
                 VoiceChannels.Stereo,
                 OpusApplication.Audio);
 
+            _logger.LogInformation("[Adapter] OpenPcmSinkAsync: sink ready.");
             _pcmSink = opus;
             return opus;
         }
@@ -57,7 +80,7 @@ namespace ChizuChan.Adapters
                 return Task.CompletedTask;
 
             // Sending a speaking flag of 0 tells Discord the bot has stopped talking.
-            return _voiceClient.EnterSpeakingStateAsync(0).AsTask();
+            return _voiceClient.EnterSpeakingStateAsync(new SpeakingProperties((SpeakingFlags)0)).AsTask();
         }
 
         public Task DisconnectAsync(CancellationToken ct)
