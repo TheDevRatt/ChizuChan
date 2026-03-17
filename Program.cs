@@ -45,6 +45,7 @@ namespace ChizuChan
             .AddApplicationCommands()
             .AddComponentInteractions()
             .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
+            .Configure<OllamaOptions>(builder.Configuration.GetSection("Ollama"))
             .AddAllServicesFromAssembly(typeof(Program).Assembly)
             .AddHttpClient();
 

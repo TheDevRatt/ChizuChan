@@ -24,6 +24,7 @@ namespace ChizuChan.Commands
         private readonly GatewayClient _gatewayClient;
         private readonly IMusicUiState _uiState;
         private readonly RestClient _restClient;
+        private readonly IVoiceClientRegistry _vcRegistry;
 
         public MusicCommandModule(
             IVoiceService voiceService,
@@ -32,7 +33,8 @@ namespace ChizuChan.Commands
             ILogger<MusicCommandModule> logger,
             GatewayClient gatewayClient,
             RestClient restClient,
-            IMusicUiState uiState)
+            IMusicUiState uiState,
+            IVoiceClientRegistry vcRegistry)
         {
             _voiceService = voiceService;
             _guildService = guildService;
@@ -41,6 +43,7 @@ namespace ChizuChan.Commands
             _gatewayClient = gatewayClient;
             _uiState = uiState;
             _restClient = restClient;
+            _vcRegistry = vcRegistry;
         }
 
         [SlashCommand("play", "Plays a YouTube (or direct) audio URL.", Contexts = [InteractionContextType.Guild])]
@@ -117,6 +120,7 @@ namespace ChizuChan.Commands
                         var vcConfig = new VoiceClientConfiguration
                         {
                             Logger = new MicrosoftLoggerVoiceAdapter(_logger),
+                            ReceiveHandler = new VoiceReceiveHandler(),
                         };
                         VoiceClient vc = await _gatewayClient.JoinVoiceChannelAsync(guild.Id, voiceChannelId, vcConfig);
 
@@ -130,6 +134,7 @@ namespace ChizuChan.Commands
                         _logger.LogInformation("[Connect] Calling vc.StartAsync...");
                         await vc.StartAsync(ct);
                         _logger.LogInformation("[Connect] vc.StartAsync returned, handing off to adapter (readiness polled in OpenPcmSinkAsync).");
+                        _vcRegistry.Register(guild.Id, vc);
                         return new NetCordVoiceConnectionAdapter(vc, _logger);
                     });
 
