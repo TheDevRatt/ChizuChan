@@ -73,8 +73,17 @@ namespace ChizuChan.Services
                     _logger.LogInformation("[Whisper] Model downloaded.");
                 }
 
-                _factory = WhisperFactory.FromPath(ModelPath);
-                _logger.LogInformation("[Whisper] Initialized from {Path}", ModelPath);
+                try
+                {
+                    _factory = WhisperFactory.FromPath(ModelPath, new WhisperFactoryOptions { GpuDevice = 0 });
+                    _logger.LogInformation("[Whisper] Initialized with CUDA GPU (device 0) from {Path}", ModelPath);
+                }
+                catch (Exception gpuEx)
+                {
+                    _logger.LogWarning("[Whisper] CUDA unavailable ({Msg}), falling back to CPU", gpuEx.Message);
+                    _factory = WhisperFactory.FromPath(ModelPath);
+                    _logger.LogInformation("[Whisper] Initialized with CPU runtime from {Path}", ModelPath);
+                }
             }
             finally
             {
