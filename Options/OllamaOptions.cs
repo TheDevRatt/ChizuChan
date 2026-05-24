@@ -2,9 +2,22 @@ namespace ChizuChan.Options
 {
     public class OllamaOptions
     {
-        public string BaseUrl { get; set; } = "https://ollama.echoray.fyi/api/chat";
+        /// <summary>
+        /// Local Ollama chat endpoint. Keep this on localhost so Chizu's LLM traffic stays on the machine running the bot.
+        /// </summary>
+        public string BaseUrl { get; set; } = "http://localhost:11434/api/chat";
+
+        /// <summary>
+        /// Optional bearer token for reverse-proxied Ollama instances. Leave empty for local Ollama.
+        /// </summary>
         public string BearerToken { get; set; } = string.Empty;
-        public string Model { get; set; } = "nous-hermes2:latest";
+
+        /// <summary>
+        /// Default model to use at startup. qwen2.5:3b is small enough for a 4GB GTX 1650 while still being useful.
+        /// </summary>
+        public string Model { get; set; } = "qwen2.5:3b";
+
+        public int RequestTimeoutSeconds { get; set; } = 180;
 
         /// <summary>
         /// The personality/system prompt sent to the model on every request.

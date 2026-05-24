@@ -8,23 +8,27 @@ namespace ChizuChan.Commands
     /// <summary>Choices shown in the /model slash command.</summary>
     public enum AiModel
     {
-        [SlashCommandChoice(Name = "Gemma 3 12B (Vision)")]
-        Gemma3_12b,
+        [SlashCommandChoice(Name = "Qwen 2.5 3B (recommended, 4GB GPU)")]
+        Qwen25_3b,
 
-        [SlashCommandChoice(Name = "Nous Hermes 2")]
-        NousHermes2,
+        [SlashCommandChoice(Name = "Phi 3.5 Mini 3.8B")]
+        Phi35Mini,
 
-        [SlashCommandChoice(Name = "Llama 2 Uncensored 7B")]
-        Llama2Uncensored,
+        [SlashCommandChoice(Name = "Gemma 3 1B (fastest)")]
+        Gemma3_1b,
+
+        [SlashCommandChoice(Name = "Gemma 3 4B (Vision, heavier)")]
+        Gemma3_4b,
     }
 
     public class AiCommandModule : ApplicationCommandModule<ApplicationCommandContext>
     {
         private static readonly Dictionary<AiModel, string> ModelMap = new()
         {
-            [AiModel.Gemma3_12b]       = "gemma3:4b",
-            [AiModel.NousHermes2]      = "nous-hermes2:latest",
-            [AiModel.Llama2Uncensored] = "llama2-uncensored:7b",
+            [AiModel.Qwen25_3b]  = "qwen2.5:3b",
+            [AiModel.Phi35Mini]  = "phi3.5",
+            [AiModel.Gemma3_1b]  = "gemma3:1b",
+            [AiModel.Gemma3_4b]  = "gemma3:4b",
         };
 
         private readonly IOllamaModelState _modelState;

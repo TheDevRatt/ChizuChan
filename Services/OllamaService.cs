@@ -108,8 +108,9 @@ namespace ChizuChan.Services
             // ── Diagnostics ───────────────────────────────────────────────────
             _logger.LogInformation("[Ollama] URL:   {Url}", _options.BaseUrl);
             _logger.LogInformation("[Ollama] Model: {Model}", currentModel);
-            _logger.LogInformation("[Ollama] Token present: {HasToken}", !string.IsNullOrEmpty(_options.BearerToken));
+            _logger.LogInformation("[Ollama] Token present: {HasToken}", !string.IsNullOrWhiteSpace(_options.BearerToken));
             _logger.LogInformation("[Ollama] Images attached: {Count}", base64Images.Count);
+            _logger.LogInformation("[Ollama] Timeout: {Seconds}s", _options.RequestTimeoutSeconds);
             _logger.LogInformation("[Ollama] System prompt ({Len} chars): {Snippet}",
                 systemContent.Length,
                 systemContent.Length > 200 ? systemContent.ToString()[..200] + "…" : systemContent.ToString());
@@ -118,14 +119,16 @@ namespace ChizuChan.Services
             _logger.LogDebug("[Ollama] Full request body: {Body}", requestBody);
 
             using var request = new HttpRequestMessage(HttpMethod.Post, _options.BaseUrl);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.BearerToken);
+            if (!string.IsNullOrWhiteSpace(_options.BearerToken))
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _options.BearerToken);
             request.Content = new StringContent(requestBody, Encoding.UTF8, "application/json");
 
-            var response = await _httpClient.SendAsync(request);
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(1, _options.RequestTimeoutSeconds)));
+            var response = await _httpClient.SendAsync(request, timeoutCts.Token);
 
             _logger.LogInformation("[Ollama] Response status: {Status}", (int)response.StatusCode);
 
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync(timeoutCts.Token);
 
             if (!response.IsSuccessStatusCode)
             {
