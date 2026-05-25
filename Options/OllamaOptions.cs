@@ -20,6 +20,16 @@ namespace ChizuChan.Options
         public int RequestTimeoutSeconds { get; set; } = 180;
 
         /// <summary>
+        /// Persisted usage counters for provider quotas/rate-limit cooldowns. Relative paths resolve beside the exe.
+        /// </summary>
+        public string UsageStorePath { get; set; } = "llm-usage.json";
+
+        /// <summary>
+        /// Ordered provider pool. If empty, the legacy BaseUrl/Model settings are used as a single local Ollama provider.
+        /// </summary>
+        public List<LlmProviderOptions> Providers { get; set; } = [];
+
+        /// <summary>
         /// The personality/system prompt sent to the model on every request.
         /// Override this in appsettings.json under "Ollama:SystemPrompt".
         /// </summary>

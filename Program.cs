@@ -51,6 +51,7 @@ namespace ChizuChan
 
             // Explicit registrations (keep these even if you scan)
             builder.Services.AddSingleton<IStatusProvider, WeatherStatusProvider>();
+            builder.Services.AddSingleton<LlmUsageTracker>();
             builder.Services.AddHostedService<StatusRotatorService>();
 
             var host = builder.Build()
