@@ -25,6 +25,11 @@ namespace ChizuChan.Options
         public string UsageStorePath { get; set; } = "llm-usage.json";
 
         /// <summary>
+        /// Persisted provider override. Relative paths resolve beside the exe.
+        /// </summary>
+        public string OverrideStorePath { get; set; } = "llm-provider-override.json";
+
+        /// <summary>
         /// Ordered provider pool. If empty, the legacy BaseUrl/Model settings are used as a single local Ollama provider.
         /// </summary>
         public List<LlmProviderOptions> Providers { get; set; } = [];

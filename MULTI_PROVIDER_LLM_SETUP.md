@@ -42,6 +42,7 @@ If no online keys are configured, Chizu automatically skips online providers and
   "Model": "qwen2.5:3b",
   "RequestTimeoutSeconds": 180,
   "UsageStorePath": "llm-usage.json",
+  "OverrideStorePath": "llm-provider-override.json",
   "Providers": [
     {
       "Name": "groq-fast",
@@ -121,7 +122,7 @@ Tracked per provider:
 
 Delete `llm-usage.json` if you ever want to reset Chizu's local counters manually.
 
-## Discord command
+## Discord commands
 
 Use:
 
@@ -129,7 +130,23 @@ Use:
 /llm_status
 ```
 
-It shows each configured provider, whether it has a key, whether the tracker thinks it is available, requests today, token usage, and cooldown state.
+It shows each configured provider, the active override, whether API keys are present, whether the tracker thinks it is available, requests today, token usage, and cooldown state.
+
+Use:
+
+```text
+/llm_provider
+```
+
+to switch between:
+
+- Auto Routing
+- Quality: Groq Llama 3.3 70B
+- Fast: Groq Llama 3.1 8B
+- OpenRouter Free
+- Local Ollama
+
+Provider override persists in `llm-provider-override.json` beside the exe.
 
 ## Notes
 

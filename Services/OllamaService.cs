@@ -18,6 +18,7 @@ namespace ChizuChan.Services
         private readonly OllamaOptions _options;
         private readonly IOllamaModelState _modelState;
         private readonly LlmUsageTracker _usageTracker;
+        private readonly LlmProviderOverrideState _overrideState;
         private readonly ILogger<OllamaService> _logger;
 
         public OllamaService(
@@ -25,13 +26,16 @@ namespace ChizuChan.Services
             IOptions<OllamaOptions> options,
             IOllamaModelState modelState,
             LlmUsageTracker usageTracker,
+            LlmProviderOverrideState overrideState,
             ILogger<OllamaService> logger)
         {
             _httpClient = httpClient;
             _options = options.Value;
             _modelState = modelState;
             _usageTracker = usageTracker;
+            _overrideState = overrideState;
             _usageTracker.UseStore(_options.UsageStorePath);
+            _overrideState.UseStore(_options.OverrideStorePath);
             _logger = logger;
         }
 
@@ -115,25 +119,43 @@ namespace ChizuChan.Services
 
         private IEnumerable<LlmProviderOptions> GetProviders()
         {
-            if (_options.Providers.Count > 0)
-                return _options.Providers
-                    .Where(p => p.Enabled)
-                    .OrderBy(p => p.Priority)
-                    .ThenBy(p => p.EffectiveName, StringComparer.OrdinalIgnoreCase);
+            var providers = _options.Providers.Count > 0
+                ? _options.Providers.Where(p => p.Enabled).ToList()
+                :
+                [
+                    new LlmProviderOptions
+                    {
+                        Name = "local-ollama",
+                        Kind = LlmProviderKind.Ollama,
+                        BaseUrl = _options.BaseUrl,
+                        ApiKey = _options.BearerToken,
+                        Model = _modelState.CurrentModel,
+                        SupportsVision = _modelState.IsVisionModel,
+                        Priority = 100
+                    }
+                ];
 
-            return
-            [
-                new LlmProviderOptions
+            var overrideName = _overrideState.OverrideProviderName;
+            if (!string.IsNullOrWhiteSpace(overrideName))
+            {
+                var match = providers.FirstOrDefault(p =>
+                    string.Equals(p.EffectiveName, overrideName, StringComparison.OrdinalIgnoreCase));
+
+                if (match is not null)
                 {
-                    Name = "local-ollama",
-                    Kind = LlmProviderKind.Ollama,
-                    BaseUrl = _options.BaseUrl,
-                    ApiKey = _options.BearerToken,
-                    Model = _modelState.CurrentModel,
-                    SupportsVision = _modelState.IsVisionModel,
-                    Priority = 100
+                    _logger.LogInformation("[LLM] Provider override active: {Provider}", match.EffectiveName);
+                    return providers
+                        .OrderByDescending(p => ReferenceEquals(p, match))
+                        .ThenBy(p => p.Priority)
+                        .ThenBy(p => p.EffectiveName, StringComparer.OrdinalIgnoreCase);
                 }
-            ];
+
+                _logger.LogWarning("[LLM] Provider override {Provider} is configured but no enabled provider matches it", overrideName);
+            }
+
+            return providers
+                .OrderBy(p => p.Priority)
+                .ThenBy(p => p.EffectiveName, StringComparer.OrdinalIgnoreCase);
         }
 
         private async Task<List<string>> DownloadImagesAsync(IList<string>? imageUrls, bool anyProviderSupportsVision)

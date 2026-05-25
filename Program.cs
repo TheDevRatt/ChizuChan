@@ -12,6 +12,7 @@ using NetCord.Hosting.Gateway;
 using NetCord.Hosting.Services;
 using NetCord.Hosting.Services.ApplicationCommands;
 using NetCord.Hosting.Services.ComponentInteractions;
+using Microsoft.Extensions.Options;
 
 namespace ChizuChan
 {
@@ -52,6 +53,14 @@ namespace ChizuChan
             // Explicit registrations (keep these even if you scan)
             builder.Services.AddSingleton<IStatusProvider, WeatherStatusProvider>();
             builder.Services.AddSingleton<LlmUsageTracker>();
+            builder.Services.AddSingleton<LlmProviderOverrideState>(sp =>
+            {
+                var options = sp.GetRequiredService<IOptions<OllamaOptions>>().Value;
+                var logger = sp.GetRequiredService<ILogger<LlmProviderOverrideState>>();
+                var state = new LlmProviderOverrideState();
+                state.UseStore(options.OverrideStorePath, logger);
+                return state;
+            });
             builder.Services.AddHostedService<StatusRotatorService>();
 
             var host = builder.Build()
