@@ -1,4 +1,3 @@
-using System.Text;
 using ChizuChan.DTOs;
 using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
@@ -14,26 +13,32 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly ILidarrService _lidarrService;
     private readonly IMusicSearchSessionService _sessionService;
     private readonly IMusicRequestAccessService _accessService;
+    private readonly IYouTubeMusicSearchService _youtubeService;
+    private readonly IMusicSearchEmbedBuilder _embedBuilder;
     private readonly LidarrOptions _options;
 
     public MusicRequestCommandModule(
         ILidarrService lidarrService,
         IMusicSearchSessionService sessionService,
         IMusicRequestAccessService accessService,
+        IYouTubeMusicSearchService youtubeService,
+        IMusicSearchEmbedBuilder embedBuilder,
         IOptions<LidarrOptions> options)
     {
         _lidarrService = lidarrService;
         _sessionService = sessionService;
         _accessService = accessService;
+        _youtubeService = youtubeService;
+        _embedBuilder = embedBuilder;
         _options = options.Value;
     }
 
     [SlashCommand(
         "music_search",
-        "Search Lidarr for an album.",
+        "Search for requestable albums and matching YouTube tracks.",
         Contexts = [InteractionContextType.BotDMChannel])]
     public async Task SearchAsync(
-        [SlashCommandParameter(Description = "Album title or artist to search for")]
+        [SlashCommandParameter(Description = "Song, album, or artist to search for")]
         string query)
     {
         await RespondAsync(InteractionCallback.DeferredMessage());
@@ -49,7 +54,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
 
         if (string.IsNullOrWhiteSpace(query))
         {
-            await ModifyResponseAsync(m => m.Content = "Please enter an album or artist to search for.");
+            await ModifyResponseAsync(m => m.Content = "Please enter a song, album, or artist to search for.");
             return;
         }
 
@@ -60,55 +65,42 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
             return;
         }
 
-        StandardResponse<IReadOnlyList<LidarrAlbumDTO>> response;
+        MusicSearchResultsDTO results;
+        using var timeoutSource = new CancellationTokenSource(
+            TimeSpan.FromSeconds(Math.Clamp(_options.SearchTimeoutSeconds, 5, 60)));
         try
         {
-            response = await MusicSearchCommandCoordinator.SearchAsync(
+            results = await MusicSearchCommandCoordinator.SearchAsync(
                 Context.User.Id,
                 trimmedQuery,
                 _sessionService,
-                _lidarrService);
+                _lidarrService,
+                _youtubeService,
+                timeoutSource.Token);
+        }
+        catch (MusicSearchInProgressException)
+        {
+            await ModifyResponseAsync(m => m.Content = "Your previous music search is still running.");
+            return;
+        }
+        catch (OperationCanceledException) when (timeoutSource.IsCancellationRequested)
+        {
+            await ModifyResponseAsync(m => m.Content = "Music search timed out. Please try again.");
+            return;
         }
         catch
         {
-            await ModifyResponseAsync(m => m.Content = "Couldn't search for albums right now.");
+            await ModifyResponseAsync(m => m.Content = "Couldn't search for music right now.");
             return;
         }
 
-        if (!response.Success)
+        var embed = _embedBuilder.Build(trimmedQuery, results);
+        await ModifyResponseAsync(message =>
         {
-            await ModifyResponseAsync(m => m.Content = "Couldn't search for albums right now.");
-            return;
-        }
-
-        var albums = response.Data?.Take(10).ToArray() ?? [];
-        if (albums.Length == 0)
-        {
-            await ModifyResponseAsync(m => m.Content = "No albums found.");
-            return;
-        }
-
-        _sessionService.SaveResults(Context.User.Id, albums);
-
-        var message = new StringBuilder("**Album results**\n");
-        for (var index = 0; index < albums.Length; index++)
-        {
-            var album = albums[index];
-            var artist = Limit(album.Artist?.ArtistName ?? "Unknown artist", 70);
-            var title = Limit(album.Title ?? "Unknown album", 70);
-            var year = album.ReleaseDate?.Year.ToString() ?? "year unknown";
-            message.Append(index + 1)
-                .Append(". ")
-                .Append(artist)
-                .Append(" — ")
-                .Append(title)
-                .Append(" (")
-                .Append(year)
-                .Append(")\n");
-        }
-
-        message.Append("Use `/music_request result:<number>` to request one.");
-        await ModifyResponseAsync(m => m.Content = message.ToString());
+            message.Content = null;
+            message.Embeds = [embed];
+            message.Components = [];
+        });
     }
 
     [SlashCommand(
