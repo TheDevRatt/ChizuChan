@@ -27,11 +27,13 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Mes
     public Task NextAsync() => NavigateAsync(moveNext: true);
 
     [ComponentInteraction("music_search_action")]
-    public Task ActionAsync() =>
+    public Task ActionAsync(string actionTokenSegment, int index) =>
         _actionCoordinator.ExecuteAndCommitAsync(
             Context.User.Id,
             Context.Channel.Id,
             Context.Interaction.Message.Id,
+            actionTokenSegment,
+            index,
             _ => RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral)),
             async (result, _) =>
             {

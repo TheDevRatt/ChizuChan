@@ -17,12 +17,16 @@ public interface IMusicSearchActionCoordinator
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
+        string actionTokenSegment,
+        int index,
         CancellationToken cancellationToken = default);
 
     Task<MusicSearchActionResult> ExecuteAndCommitAsync(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
+        string actionTokenSegment,
+        int index,
         Func<CancellationToken, Task> acknowledgeAsync,
         Func<MusicSearchActionResult, CancellationToken, Task> commitAsync,
         CancellationToken cancellationToken = default);
@@ -32,6 +36,8 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
 {
     private const string ExpiredMessage =
         "This music search has expired or was superseded. Run `/music_search` again.";
+    private const string AlreadyProcessingMessage =
+        "This selection is already being processed. Please wait for it to finish.";
 
     private readonly IMusicSearchSessionService _sessionService;
     private readonly IMusicRequestAccessService _accessService;
@@ -57,23 +63,33 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
+        string actionTokenSegment,
+        int index,
         CancellationToken cancellationToken = default)
     {
-        var found = _sessionService.TryCaptureCurrentSelection(
-            userId, dmChannelId, sourceMessageId, out var selection);
-        return ExecuteCapturedAndCommitAsync(
-            found ? selection : null,
+        var found = _sessionService.TryClaimRenderedSelection(
+            userId,
+            dmChannelId,
+            sourceMessageId,
+            actionTokenSegment,
+            index,
+            out var claim);
+        return ExecuteClaimedAndCommitAsync(
+            found ? claim : null,
+            claim.Failure,
             static _ => Task.CompletedTask,
             static (_, _) => Task.CompletedTask,
             cancellationToken);
     }
 
-    // This method intentionally is not async: capture happens synchronously when the
-    // interaction handler calls it, before acknowledgement can yield to another interaction.
+    // This method intentionally is not async: the rendered token/index is claimed synchronously
+    // when the interaction handler calls it, before acknowledgement can yield.
     public Task<MusicSearchActionResult> ExecuteAndCommitAsync(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
+        string actionTokenSegment,
+        int index,
         Func<CancellationToken, Task> acknowledgeAsync,
         Func<MusicSearchActionResult, CancellationToken, Task> commitAsync,
         CancellationToken cancellationToken = default)
@@ -81,28 +97,45 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         ArgumentNullException.ThrowIfNull(acknowledgeAsync);
         ArgumentNullException.ThrowIfNull(commitAsync);
 
-        var found = _sessionService.TryCaptureCurrentSelection(
-            userId, dmChannelId, sourceMessageId, out var selection);
-        return ExecuteCapturedAndCommitAsync(
-            found ? selection : null,
+        var found = _sessionService.TryClaimRenderedSelection(
+            userId,
+            dmChannelId,
+            sourceMessageId,
+            actionTokenSegment,
+            index,
+            out var claim);
+        return ExecuteClaimedAndCommitAsync(
+            found ? claim : null,
+            claim.Failure,
             acknowledgeAsync,
             commitAsync,
             cancellationToken);
     }
 
-    private async Task<MusicSearchActionResult> ExecuteCapturedAndCommitAsync(
-        MusicSearchSelectionSnapshot? selection,
+    private async Task<MusicSearchActionResult> ExecuteClaimedAndCommitAsync(
+        MusicSearchSelectionClaim? claim,
+        MusicSearchSelectionClaimFailure claimFailure,
         Func<CancellationToken, Task> acknowledgeAsync,
         Func<MusicSearchActionResult, CancellationToken, Task> commitAsync,
         CancellationToken cancellationToken)
     {
-        await acknowledgeAsync(cancellationToken);
+        try
+        {
+            await acknowledgeAsync(cancellationToken);
 
-        var result = selection is null
-            ? MusicSearchActionResult.Failed(ExpiredMessage)
-            : await ExecuteCoreAsync(selection, cancellationToken);
-        await commitAsync(result, cancellationToken);
-        return result;
+            var result = claim is null
+                ? MusicSearchActionResult.Failed(claimFailure == MusicSearchSelectionClaimFailure.AlreadyProcessing
+                    ? AlreadyProcessingMessage
+                    : ExpiredMessage)
+                : await ExecuteCoreAsync(claim.Selection, cancellationToken);
+            await commitAsync(result, cancellationToken);
+            return result;
+        }
+        finally
+        {
+            if (claim is not null)
+                _sessionService.ReleaseSelectionClaim(claim);
+        }
     }
 
     private async Task<MusicSearchActionResult> ExecuteCoreAsync(

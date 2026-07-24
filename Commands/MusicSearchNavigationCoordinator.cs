@@ -59,8 +59,10 @@ public sealed class MusicSearchNavigationCoordinator : IMusicSearchNavigationCoo
             userId, dmChannelId, sourceMessageId, cancellationToken);
 
         var found = moveNext
-            ? _sessionService.MoveNext(userId, dmChannelId, sourceMessageId, out var snapshot)
-            : _sessionService.MovePrevious(userId, dmChannelId, sourceMessageId, out snapshot);
+            ? _sessionService.PrepareNext(
+                userId, dmChannelId, sourceMessageId, out var snapshot, out var renderCommit)
+            : _sessionService.PreparePrevious(
+                userId, dmChannelId, sourceMessageId, out snapshot, out renderCommit);
 
         if (!found)
         {
@@ -74,5 +76,6 @@ public sealed class MusicSearchNavigationCoordinator : IMusicSearchNavigationCoo
         await modifyMessageAsync(
             new MusicSearchNavigationUpdate(null, rendered.Embed, rendered.Components, snapshot),
             cancellationToken);
+        _sessionService.CommitRendered(renderCommit);
     }
 }

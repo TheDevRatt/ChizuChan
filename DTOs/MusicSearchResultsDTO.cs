@@ -214,7 +214,8 @@ public sealed record MusicSearchSessionSnapshot
         ulong dmChannelId,
         ulong sourceMessageId,
         bool lidarrAvailable,
-        bool youtubeAvailable)
+        bool youtubeAvailable,
+        string actionTokenSegment = "")
     {
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(pages);
@@ -227,6 +228,7 @@ public sealed record MusicSearchSessionSnapshot
         SourceMessageId = sourceMessageId;
         LidarrAvailable = lidarrAvailable;
         YouTubeAvailable = youtubeAvailable;
+        ActionTokenSegment = actionTokenSegment;
     }
 
     public string Query { get; init; }
@@ -237,6 +239,7 @@ public sealed record MusicSearchSessionSnapshot
     public ulong SourceMessageId { get; }
     public bool LidarrAvailable { get; init; }
     public bool YouTubeAvailable { get; init; }
+    public string ActionTokenSegment { get; }
 
     public MusicSearchResultPage? CurrentPage =>
         CurrentIndex >= 0 && CurrentIndex < Pages.Count ? Pages[CurrentIndex] : null;

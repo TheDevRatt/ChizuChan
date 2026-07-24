@@ -30,23 +30,31 @@ public interface IMusicSearchSessionService
         ulong sourceMessageId,
         out MusicSearchSessionSnapshot session);
 
-    bool TryCaptureCurrentSelection(
+    bool TryClaimRenderedSelection(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
-        out MusicSearchSelectionSnapshot selection);
+        string actionTokenSegment,
+        int index,
+        out MusicSearchSelectionClaim claim);
 
-    bool MovePrevious(
-        ulong userId,
-        ulong dmChannelId,
-        ulong sourceMessageId,
-        out MusicSearchSessionSnapshot session);
+    void ReleaseSelectionClaim(MusicSearchSelectionClaim claim);
 
-    bool MoveNext(
+    bool PreparePrevious(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
-        out MusicSearchSessionSnapshot session);
+        out MusicSearchSessionSnapshot session,
+        out MusicSearchRenderCommit renderCommit);
+
+    bool PrepareNext(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        out MusicSearchSessionSnapshot session,
+        out MusicSearchRenderCommit renderCommit);
+
+    bool CommitRendered(MusicSearchRenderCommit renderCommit);
 
     // Compatibility for the existing slash-command flow until it is switched to component actions.
     void SaveResults(ulong userId, IEnumerable<LidarrAlbumDTO> results);

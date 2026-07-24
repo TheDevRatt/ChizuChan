@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Security.Cryptography;
 using ChizuChan.DTOs;
 using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
@@ -8,15 +9,28 @@ namespace ChizuChan.Services;
 
 public readonly struct MusicSearchSessionToken : IEquatable<MusicSearchSessionToken>
 {
-    private readonly Guid _value;
+    private readonly string? _segment;
 
-    private MusicSearchSessionToken(Guid value) => _value = value;
+    private MusicSearchSessionToken(string segment) => _segment = segment;
 
-    internal static MusicSearchSessionToken Create() => new(Guid.NewGuid());
+    internal static MusicSearchSessionToken Create()
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        RandomNumberGenerator.Fill(bytes);
+        var segment = Convert.ToBase64String(bytes)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+        return new MusicSearchSessionToken(segment);
+    }
 
-    public bool Equals(MusicSearchSessionToken other) => _value.Equals(other._value);
+    public string Segment => _segment ?? string.Empty;
+
+    public bool Equals(MusicSearchSessionToken other) =>
+        string.Equals(_segment, other._segment, StringComparison.Ordinal);
+
     public override bool Equals(object? obj) => obj is MusicSearchSessionToken other && Equals(other);
-    public override int GetHashCode() => _value.GetHashCode();
+    public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(Segment);
     public static bool operator ==(MusicSearchSessionToken left, MusicSearchSessionToken right) => left.Equals(right);
     public static bool operator !=(MusicSearchSessionToken left, MusicSearchSessionToken right) => !left.Equals(right);
 }
@@ -45,6 +59,74 @@ public sealed record MusicSearchSelectionSnapshot
     public ulong DmChannelId { get; }
     public ulong SourceMessageId { get; }
     public MusicSearchResultPage Page { get; }
+}
+
+public enum MusicSearchSelectionClaimFailure
+{
+    None,
+    Unavailable,
+    AlreadyProcessing,
+}
+
+/// <summary>
+/// An atomic claim on the action for one rendered page.
+/// </summary>
+public sealed class MusicSearchSelectionClaim
+{
+    private MusicSearchSelectionClaim(
+        MusicSearchSelectionSnapshot? selection,
+        MusicSearchSelectionClaimFailure failure,
+        MusicSearchSessionToken sessionToken,
+        int index)
+    {
+        Selection = selection!;
+        Failure = failure;
+        SessionToken = sessionToken;
+        Index = index;
+    }
+
+    public MusicSearchSelectionSnapshot Selection { get; }
+    public MusicSearchSelectionClaimFailure Failure { get; }
+    internal MusicSearchSessionToken SessionToken { get; }
+    internal int Index { get; }
+    internal bool Acquired => Failure == MusicSearchSelectionClaimFailure.None;
+
+    internal static MusicSearchSelectionClaim Succeeded(
+        MusicSearchSelectionSnapshot selection,
+        MusicSearchSessionToken token,
+        int index) => new(selection, MusicSearchSelectionClaimFailure.None, token, index);
+
+    internal static MusicSearchSelectionClaim Rejected(MusicSearchSelectionClaimFailure failure) =>
+        new(null, failure, default, -1);
+}
+
+/// <summary>
+/// Opaque proof of a prepared render. It can only commit against the same live session and rendered page.
+/// </summary>
+public sealed class MusicSearchRenderCommit
+{
+    internal MusicSearchRenderCommit(
+        ulong ownerUserId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        MusicSearchSessionToken sessionToken,
+        int expectedRenderedIndex,
+        int targetIndex)
+    {
+        OwnerUserId = ownerUserId;
+        DmChannelId = dmChannelId;
+        SourceMessageId = sourceMessageId;
+        SessionToken = sessionToken;
+        ExpectedRenderedIndex = expectedRenderedIndex;
+        TargetIndex = targetIndex;
+    }
+
+    internal ulong OwnerUserId { get; }
+    internal ulong DmChannelId { get; }
+    internal ulong SourceMessageId { get; }
+    internal MusicSearchSessionToken SessionToken { get; }
+    internal int ExpectedRenderedIndex { get; }
+    internal int TargetIndex { get; }
 }
 
 public class MusicSearchSessionService : IMusicSearchSessionService
@@ -89,7 +171,7 @@ public class MusicSearchSessionService : IMusicSearchSessionService
             {
                 Query = query.Trim(),
                 Pages = savedPages,
-                CurrentIndex = 0,
+                RenderedIndex = 0,
                 OwnerUserId = userId,
                 DmChannelId = dmChannelId,
                 SourceMessageId = 0,
@@ -132,6 +214,8 @@ public class MusicSearchSessionService : IMusicSearchSessionService
             if (session.SourceMessageId != 0 && session.SourceMessageId != sourceMessageId)
                 return false;
 
+            if (session.SourceMessageId == 0)
+                session.RenderedIndex = 0;
             session.SourceMessageId = sourceMessageId;
             return true;
         }
@@ -179,45 +263,98 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         }
     }
 
-    public bool TryCaptureCurrentSelection(
+    public bool TryClaimRenderedSelection(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
-        out MusicSearchSelectionSnapshot selection)
+        string actionTokenSegment,
+        int index,
+        out MusicSearchSelectionClaim claim)
     {
+        ArgumentNullException.ThrowIfNull(actionTokenSegment);
+
         lock (_syncRoot)
         {
             if (!TryGetBoundSession(userId, dmChannelId, sourceMessageId, out var stored) ||
-                stored.CurrentIndex < 0 ||
-                stored.CurrentIndex >= stored.Pages.Length)
+                !string.Equals(stored.Token.Segment, actionTokenSegment, StringComparison.Ordinal) ||
+                index < 0 ||
+                index >= stored.Pages.Length ||
+                stored.RenderedIndex != index)
             {
-                selection = null!;
+                claim = MusicSearchSelectionClaim.Rejected(MusicSearchSelectionClaimFailure.Unavailable);
                 return false;
             }
 
-            selection = new MusicSearchSelectionSnapshot(
+            if (!stored.InFlightActionIndexes.Add(index))
+            {
+                claim = MusicSearchSelectionClaim.Rejected(MusicSearchSelectionClaimFailure.AlreadyProcessing);
+                return false;
+            }
+
+            var selection = new MusicSearchSelectionSnapshot(
                 stored.Token,
                 stored.OwnerUserId,
                 stored.DmChannelId,
                 stored.SourceMessageId,
-                stored.Pages[stored.CurrentIndex]);
+                stored.Pages[index]);
+            claim = MusicSearchSelectionClaim.Succeeded(selection, stored.Token, index);
             return true;
         }
     }
 
-    public bool MovePrevious(
-        ulong userId,
-        ulong dmChannelId,
-        ulong sourceMessageId,
-        out MusicSearchSessionSnapshot session) =>
-        Move(userId, dmChannelId, sourceMessageId, -1, out session);
+    public void ReleaseSelectionClaim(MusicSearchSelectionClaim claim)
+    {
+        ArgumentNullException.ThrowIfNull(claim);
+        if (!claim.Acquired)
+            return;
 
-    public bool MoveNext(
+        lock (_syncRoot)
+        {
+            var ownerUserId = claim.Selection.OwnerUserId;
+            if (_sessions.TryGetValue(ownerUserId, out var stored) && stored.Token == claim.SessionToken)
+                stored.InFlightActionIndexes.Remove(claim.Index);
+        }
+    }
+
+    public bool PreparePrevious(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
-        out MusicSearchSessionSnapshot session) =>
-        Move(userId, dmChannelId, sourceMessageId, 1, out session);
+        out MusicSearchSessionSnapshot session,
+        out MusicSearchRenderCommit renderCommit) =>
+        PrepareMove(userId, dmChannelId, sourceMessageId, -1, out session, out renderCommit);
+
+    public bool PrepareNext(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        out MusicSearchSessionSnapshot session,
+        out MusicSearchRenderCommit renderCommit) =>
+        PrepareMove(userId, dmChannelId, sourceMessageId, 1, out session, out renderCommit);
+
+    public bool CommitRendered(MusicSearchRenderCommit renderCommit)
+    {
+        ArgumentNullException.ThrowIfNull(renderCommit);
+
+        lock (_syncRoot)
+        {
+            if (!TryGetBoundSession(
+                    renderCommit.OwnerUserId,
+                    renderCommit.DmChannelId,
+                    renderCommit.SourceMessageId,
+                    out var stored) ||
+                stored.Token != renderCommit.SessionToken ||
+                stored.RenderedIndex != renderCommit.ExpectedRenderedIndex ||
+                renderCommit.TargetIndex < 0 ||
+                renderCommit.TargetIndex >= stored.Pages.Length)
+            {
+                return false;
+            }
+
+            stored.RenderedIndex = renderCommit.TargetIndex;
+            return true;
+        }
+    }
 
     public void SaveResults(ulong userId, IEnumerable<LidarrAlbumDTO> results)
     {
@@ -255,23 +392,32 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         }
     }
 
-    private bool Move(
+    private bool PrepareMove(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
         int offset,
-        out MusicSearchSessionSnapshot session)
+        out MusicSearchSessionSnapshot session,
+        out MusicSearchRenderCommit renderCommit)
     {
         lock (_syncRoot)
         {
             if (!TryGetBoundSession(userId, dmChannelId, sourceMessageId, out var stored) || stored.Pages.Length == 0)
             {
                 session = null!;
+                renderCommit = null!;
                 return false;
             }
 
-            stored.CurrentIndex = (stored.CurrentIndex + offset + stored.Pages.Length) % stored.Pages.Length;
-            session = Snapshot(stored);
+            var targetIndex = (stored.RenderedIndex + offset + stored.Pages.Length) % stored.Pages.Length;
+            session = Snapshot(stored, targetIndex);
+            renderCommit = new MusicSearchRenderCommit(
+                stored.OwnerUserId,
+                stored.DmChannelId,
+                stored.SourceMessageId,
+                stored.Token,
+                stored.RenderedIndex,
+                targetIndex);
             return true;
         }
     }
@@ -304,15 +450,16 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         return false;
     }
 
-    private static MusicSearchSessionSnapshot Snapshot(SearchSession session) => new(
+    private static MusicSearchSessionSnapshot Snapshot(SearchSession session, int? index = null) => new(
         session.Query,
         session.Pages,
-        session.CurrentIndex,
+        index ?? session.RenderedIndex,
         session.OwnerUserId,
         session.DmChannelId,
         session.SourceMessageId,
         session.LidarrAvailable,
-        session.YouTubeAvailable);
+        session.YouTubeAvailable,
+        session.Token.Segment);
 
     private void RemoveExpiredSessions(DateTimeOffset now)
     {
@@ -333,7 +480,8 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         public required string Query { get; init; }
         public required ImmutableArray<MusicSearchResultPage> Pages { get; init; }
         public required MusicSearchSessionToken Token { get; init; }
-        public int CurrentIndex { get; set; }
+        public int RenderedIndex { get; set; }
+        public HashSet<int> InFlightActionIndexes { get; } = [];
         public ulong OwnerUserId { get; init; }
         public ulong DmChannelId { get; init; }
         public ulong SourceMessageId { get; set; }

@@ -12,6 +12,8 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
     private const int EmbedTitleLimit = 256;
     private const int EmbedDescriptionLimit = 4096;
     private const int EmbedFieldValueLimit = 1024;
+    private const int ComponentCustomIdLimit = 100;
+    private const string ActionCustomIdPrefix = "music_search_action:";
 
     public (EmbedProperties Embed, IMessageComponentProperties[] Components) Build(
         MusicSearchSessionSnapshot session) => Build(session.Query, session);
@@ -37,7 +39,12 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
         var actionAvailable = page.Kind == MusicSearchResultKind.YouTubeTrack
             ? session.YouTubeAvailable
             : session.LidarrAvailable;
-        return (embed, BuildComponents(page.Kind, session.TotalPages, actionAvailable));
+        return (embed, BuildComponents(
+            page.Kind,
+            session.TotalPages,
+            actionAvailable,
+            session.ActionTokenSegment,
+            session.CurrentIndex));
     }
 
     public EmbedProperties Build(string query, MusicSearchResultsDTO results)
@@ -261,7 +268,9 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
     private static IMessageComponentProperties[] BuildComponents(
         MusicSearchResultKind kind,
         int totalPages,
-        bool actionAvailable)
+        bool actionAvailable,
+        string actionTokenSegment,
+        int index)
     {
         var disableNavigation = totalPages <= 1;
         var actionLabel = kind switch
@@ -285,7 +294,13 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
             },
         };
         if (actionAvailable)
-            row.Add(new ButtonProperties("music_search_action", actionLabel, ButtonStyle.Success));
+        {
+            var actionCustomId = $"{ActionCustomIdPrefix}{actionTokenSegment}:{index}";
+            if (actionCustomId.Length > ComponentCustomIdLimit)
+                throw new InvalidOperationException("The music search action ID exceeded the Discord component limit.");
+
+            row.Add(new ButtonProperties(actionCustomId, actionLabel, ButtonStyle.Success));
+        }
 
         return [row];
     }
