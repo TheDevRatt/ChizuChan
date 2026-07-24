@@ -11,142 +11,233 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
 {
     private const int EmbedTitleLimit = 256;
     private const int EmbedDescriptionLimit = 4096;
-    private const int EmbedFieldValueLimit = 1024;
+
+    public (EmbedProperties Embed, IMessageComponentProperties[] Components) Build(
+        MusicSearchSessionSnapshot session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentNullException.ThrowIfNull(session.Pages);
+
+        var page = session.CurrentPage;
+        if (page is null || (!session.LidarrAvailable && !session.YouTubeAvailable))
+            return BuildEmpty(session);
+
+        var embed = page.Kind == MusicSearchResultKind.YouTubeTrack
+            ? BuildYouTubeEmbed(session, page)
+            : BuildLidarrEmbed(session, page);
+
+        return (embed, BuildComponents(page.Kind, session.TotalPages));
+    }
 
     public EmbedProperties Build(string query, MusicSearchResultsDTO results)
     {
         ArgumentNullException.ThrowIfNull(results);
 
-        var description = BuildAlbumDescription(results);
-        var fields = BuildYouTubeFields(results).ToList();
-        var thumbnail = results.YouTubeTracks
-            .Select(track => track.ThumbnailUrl)
-            .FirstOrDefault(IsAllowedThumbnailUrl);
+        MusicSearchResultPage? firstPage = results.Albums
+            .Select(MusicSearchResultPage.FromLidarr)
+            .FirstOrDefault();
+
+        if (firstPage is null)
+        {
+            var track = results.YouTubeTracks.FirstOrDefault();
+            if (track is not null && TryGetCanonicalVideoId(track, out var videoId))
+            {
+                track = new YouTubeTrackSuggestionDTO
+                {
+                    VideoId = videoId,
+                    Title = track.Title,
+                    Channel = track.Channel,
+                    Duration = track.Duration,
+                    Url = track.Url,
+                    ThumbnailUrl = track.ThumbnailUrl,
+                };
+                firstPage = MusicSearchResultPage.FromYouTube(track);
+            }
+        }
+
+        var pages = firstPage is null ? [] : new[] { firstPage };
+        var snapshot = new MusicSearchSessionSnapshot(
+            query,
+            pages,
+            0,
+            0,
+            0,
+            0,
+            results.LidarrAvailable,
+            results.YouTubeAvailable);
+        return Build(snapshot).Embed;
+    }
+
+    private static EmbedProperties BuildLidarrEmbed(
+        MusicSearchSessionSnapshot session,
+        MusicSearchResultPage page)
+    {
+        var album = page.LidarrAlbum ?? throw new InvalidOperationException("A Lidarr page requires album data.");
+        var title = SanitizeMarkdown(album.Title ?? "Unknown release", 240);
+        var artist = SanitizeMarkdown(album.Artist?.ArtistName ?? "Unknown artist", 160);
+        var releaseType = page.Kind switch
+        {
+            MusicSearchResultKind.Album => "Album",
+            MusicSearchResultKind.Single => "Single",
+            MusicSearchResultKind.EP => "EP",
+            _ => "Release",
+        };
+
+        var description = new StringBuilder()
+            .Append("**Artist:** ").AppendLine(artist)
+            .Append("**Type:** ").AppendLine(releaseType);
+
+        if (album.ReleaseDate is not null)
+        {
+            description
+                .Append("**Released:** ")
+                .AppendLine(album.ReleaseDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        }
+
+        if (!string.IsNullOrWhiteSpace(album.Overview))
+        {
+            description
+                .AppendLine()
+                .Append(SanitizeMarkdown(album.Overview, 3400));
+        }
+
+        AppendQuery(description, session.Query);
 
         return new EmbedProperties
         {
-            Title = $"Music search: {SanitizePlainText(query, 242)}",
-            Description = description,
+            Title = Truncate($"{releaseType}: {title}", EmbedTitleLimit),
+            Description = Truncate(description.ToString().Trim(), EmbedDescriptionLimit),
             Color = new Color(0x9B59B6),
-            Thumbnail = thumbnail is null ? null : new EmbedThumbnailProperties(thumbnail),
-            Fields = fields.ToArray(),
-            Footer = new EmbedFooterProperties
-            {
-                Text = "Use /music_request result:<number> for albums. Use a YouTube URL with /play in a server.",
-            },
+            Footer = BuildFooter(session),
         };
     }
 
-    private static string BuildAlbumDescription(MusicSearchResultsDTO results)
+    private static EmbedProperties BuildYouTubeEmbed(
+        MusicSearchSessionSnapshot session,
+        MusicSearchResultPage page)
     {
-        var builder = new StringBuilder();
-        builder.AppendLine("### Albums you can request");
+        var track = page.YouTubeTrack ?? throw new InvalidOperationException("A YouTube page requires track data.");
+        var title = SanitizeMarkdown(track.Title, 240);
+        var channel = SanitizeMarkdown(track.Channel ?? "Unknown channel", 160);
+        var duration = track.Duration is null ? "Unknown" : FormatDuration(track.Duration.Value);
+        var canonicalUrl = $"https://www.youtube.com/watch?v={track.VideoId}";
+        var description = new StringBuilder()
+            .Append("**Channel:** ").AppendLine(channel)
+            .Append("**Duration:** ").AppendLine(duration)
+            .Append("**YouTube:** [Open track](").Append(canonicalUrl).AppendLine(")");
 
-        if (!results.LidarrAvailable)
+        AppendQuery(description, session.Query);
+
+        var thumbnail = IsAllowedThumbnailUrl(track.ThumbnailUrl) ? track.ThumbnailUrl : null;
+        return new EmbedProperties
         {
-            builder.Append("Lidarr search is temporarily unavailable.");
-            return builder.ToString();
-        }
-
-        if (results.Albums.Count == 0)
-        {
-            builder.Append("No requestable albums matched this query.");
-            return builder.ToString();
-        }
-
-        for (var index = 0; index < results.Albums.Count; index++)
-        {
-            var album = results.Albums[index];
-            var artist = SanitizeMarkdown(album.Artist?.ArtistName ?? "Unknown artist", 55);
-            var title = SanitizeMarkdown(album.Title ?? "Unknown album", 80);
-            var metadata = new List<string>();
-            if (!string.IsNullOrWhiteSpace(album.AlbumType))
-                metadata.Add(SanitizeMarkdown(album.AlbumType, 30));
-            if (album.ReleaseDate is not null)
-                metadata.Add(album.ReleaseDate.Value.Year.ToString(CultureInfo.InvariantCulture));
-
-            builder
-                .Append("**")
-                .Append(index + 1)
-                .Append(". ")
-                .Append(artist)
-                .Append("** • ")
-                .Append(title)
-                .AppendLine();
-
-            if (metadata.Count > 0)
-                builder.Append('`').Append(string.Join(" • ", metadata)).Append('`').AppendLine();
-
-            if (!string.IsNullOrWhiteSpace(album.Overview))
-                builder.Append('>').Append(' ').Append(SanitizeMarkdown(album.Overview, 100)).AppendLine();
-
-            builder.AppendLine();
-        }
-
-        var description = builder.ToString().TrimEnd();
-        if (description.Length > EmbedDescriptionLimit)
-            throw new InvalidOperationException("Rendered album results exceeded the Discord embed limit.");
-
-        return description;
+            Title = Truncate($"YouTube track: {title}", EmbedTitleLimit),
+            Description = Truncate(description.ToString().Trim(), EmbedDescriptionLimit),
+            Color = new Color(0xFF0000),
+            Thumbnail = thumbnail is null ? null : new EmbedThumbnailProperties(thumbnail),
+            Footer = BuildFooter(session),
+        };
     }
 
-    private static IEnumerable<EmbedFieldProperties> BuildYouTubeFields(MusicSearchResultsDTO results)
+    private static (EmbedProperties Embed, IMessageComponentProperties[] Components) BuildEmpty(
+        MusicSearchSessionSnapshot session)
     {
-        if (!results.YouTubeAvailable)
+        var lidarrStatus = session.LidarrAvailable
+            ? "No matching Lidarr releases found."
+            : "Lidarr search is temporarily unavailable.";
+        var youtubeStatus = session.YouTubeAvailable
+            ? "No matching YouTube tracks found."
+            : "YouTube search is temporarily unavailable.";
+        var description = $"**Lidarr:** {lidarrStatus}\n**YouTube:** {youtubeStatus}";
+
+        var embed = new EmbedProperties
         {
-            yield return new EmbedFieldProperties
-            {
-                Name = "YouTube track suggestions",
-                Value = "YouTube search is temporarily unavailable.",
-                Inline = false,
-            };
-            yield break;
-        }
-
-        if (results.YouTubeTracks.Count == 0)
-        {
-            yield return new EmbedFieldProperties
-            {
-                Name = "YouTube track suggestions",
-                Value = "No matching YouTube tracks found.",
-                Inline = false,
-            };
-            yield break;
-        }
-
-        var fieldIndex = 0;
-        var value = NewYouTubeFieldValue(includeIntro: true);
-        foreach (var track in results.YouTubeTracks)
-        {
-            var title = SanitizeMarkdown(track.Title, 90);
-            var channel = SanitizeMarkdown(track.Channel ?? "Unknown channel", 50);
-            var duration = track.Duration is null ? "duration unknown" : FormatDuration(track.Duration.Value);
-            var entry = $"• [{title}]({track.Url})\n  {channel} • `{duration}`\n";
-
-            if (value.Length + entry.Length > EmbedFieldValueLimit)
-            {
-                yield return CreateYouTubeField(value, fieldIndex++);
-                value = NewYouTubeFieldValue(includeIntro: false);
-            }
-
-            value.Append(entry);
-        }
-
-        if (value.Length > 0)
-            yield return CreateYouTubeField(value, fieldIndex);
+            Title = $"Music search: {SanitizePlainText(session.Query, 242)}",
+            Description = description,
+            Color = new Color(0x9B59B6),
+            Footer = new EmbedFooterProperties { Text = "No results" },
+        };
+        return (embed, []);
     }
 
-    private static StringBuilder NewYouTubeFieldValue(bool includeIntro) =>
-        new(includeIntro
-            ? "*Playback links only. These are not numbered album requests.*\n"
-            : string.Empty);
-
-    private static EmbedFieldProperties CreateYouTubeField(StringBuilder value, int index) => new()
+    private static IMessageComponentProperties[] BuildComponents(
+        MusicSearchResultKind kind,
+        int totalPages)
     {
-        Name = index == 0 ? "YouTube track suggestions" : "YouTube track suggestions (continued)",
-        Value = value.ToString().TrimEnd(),
-        Inline = false,
+        var disableNavigation = totalPages <= 1;
+        var actionLabel = kind switch
+        {
+            MusicSearchResultKind.Album => "Request Album",
+            MusicSearchResultKind.Single => "Request Single",
+            MusicSearchResultKind.EP or MusicSearchResultKind.Release => "Request EP/Release",
+            MusicSearchResultKind.YouTubeTrack => "Download Single",
+            _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        };
+
+        return
+        [
+            new ActionRowProperties
+            {
+                new ButtonProperties("music_search_previous", "Previous", ButtonStyle.Primary)
+                {
+                    Disabled = disableNavigation,
+                },
+                new ButtonProperties("music_search_next", "Next", ButtonStyle.Primary)
+                {
+                    Disabled = disableNavigation,
+                },
+                new ButtonProperties("music_search_action", actionLabel, ButtonStyle.Success),
+            },
+        ];
+    }
+
+    private static EmbedFooterProperties BuildFooter(MusicSearchSessionSnapshot session) => new()
+    {
+        Text = $"Result {session.CurrentIndex + 1} of {session.TotalPages}",
     };
+
+    private static void AppendQuery(StringBuilder description, string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+            return;
+
+        description
+            .AppendLine()
+            .AppendLine()
+            .Append("**Search:** ")
+            .Append(SanitizeMarkdown(query, 300));
+    }
+
+    private static bool TryGetCanonicalVideoId(YouTubeTrackSuggestionDTO track, out string videoId)
+    {
+        videoId = track.VideoId?.Trim() ?? string.Empty;
+        if (IsCanonicalVideoId(videoId))
+            return true;
+
+        if (Uri.TryCreate(track.Url, UriKind.Absolute, out var uri) &&
+            uri.Scheme == Uri.UriSchemeHttps &&
+            (uri.Host.Equals("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+             uri.Host.EndsWith(".youtube.com", StringComparison.OrdinalIgnoreCase)))
+        {
+            var query = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var pair in query)
+            {
+                var parts = pair.Split('=', 2);
+                if (parts.Length == 2 && parts[0] == "v" && IsCanonicalVideoId(parts[1]))
+                {
+                    videoId = parts[1];
+                    return true;
+                }
+            }
+        }
+
+        videoId = string.Empty;
+        return false;
+    }
+
+    private static bool IsCanonicalVideoId(string value) =>
+        value.Length == 11 && value.All(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '_' or '-');
 
     private static string FormatDuration(TimeSpan duration) =>
         duration.TotalHours >= 1
@@ -203,7 +294,6 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
     private static string EscapeMarkdown(string value) =>
         value
             .Replace("\\", "\\\\", StringComparison.Ordinal)
-            .Replace("`", "\\`", StringComparison.Ordinal)
             .Replace("*", "\\*", StringComparison.Ordinal)
             .Replace("_", "\\_", StringComparison.Ordinal)
             .Replace("~", "\\~", StringComparison.Ordinal)
