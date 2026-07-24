@@ -32,6 +32,8 @@ public sealed class DiscordDmSender(RestClient restClient) : IDiscordDmSender
         ArgumentNullException.ThrowIfNull(notification);
         if (string.IsNullOrWhiteSpace(notification.NotificationNonce))
             throw new ArgumentException("A persisted notification nonce is required.", nameof(notification));
+        if (notification.NotificationNonce.Length > 25)
+            throw new ArgumentException("The persisted notification nonce exceeds Discord's limit.", nameof(notification));
 
         var artist = EscapeDiscordText(notification.ArtistName, MaximumNameLength);
         var album = EscapeDiscordText(notification.AlbumTitle, MaximumNameLength);

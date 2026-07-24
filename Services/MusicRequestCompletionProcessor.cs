@@ -1,8 +1,10 @@
+using System.Net;
 using ChizuChan.DTOs;
 using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NetCord.Rest;
 
 namespace ChizuChan.Services;
 
@@ -14,6 +16,10 @@ namespace ChizuChan.Services;
 /// </summary>
 public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionProcessor
 {
+    private const int MaximumAlbumsPerPoll = 10;
+    private const int MaximumAttempts = 100;
+    private static readonly TimeSpan HistoryClockSkewTolerance = TimeSpan.FromMinutes(2);
+
     private readonly IMusicRequestNotificationStore _store;
     private readonly ILidarrCompletionReader _completionReader;
     private readonly IDiscordDmSender _dmSender;
@@ -52,15 +58,26 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
             await SendObservedSafelyAsync(observed, cancellationToken);
         }
 
-        foreach (var albumGroup in due
-                     .Where(record => record.State == MusicRequestNotificationState.Pending)
-                     .GroupBy(record => record.LidarrAlbumId))
+        var maximumAlbums = Math.Clamp(_options.MaxAlbumsPerPoll, 1, MaximumAlbumsPerPoll);
+        var albumGroups = due
+            .Where(record => record.State == MusicRequestNotificationState.Pending)
+            .GroupBy(record => record.LidarrAlbumId)
+            .OrderBy(group => group.Min(record => record.NextAttemptAtUtc ?? record.RequestedAtUtc))
+            .ThenBy(group => group.Key)
+            .Take(maximumAlbums);
+
+        foreach (var albumGroup in albumGroups)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var subscribers = albumGroup.ToArray();
+            var earliestRequestedAt = subscribers.Min(record => record.RequestedAtUtc);
             StandardResponse<LidarrAlbumCompletionDTO> response;
             try
             {
-                response = await _completionReader.GetCompletionAsync(albumGroup.Key, cancellationToken);
+                response = await _completionReader.GetCompletionAsync(
+                    albumGroup.Key,
+                    earliestRequestedAt,
+                    cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -69,31 +86,45 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
             catch (Exception exception)
             {
                 LogSafeFailure("Lidarr completion query", exception);
-                foreach (var subscriber in albumGroup)
-                    await RecordFailureSafelyAsync(subscriber, "LidarrUnavailable", cancellationToken);
+                var failure = ClassifyHttpFailure(exception, "LidarrUnavailable", "LidarrPermanent", "LidarrRateLimited");
+                foreach (var subscriber in subscribers)
+                    await RecordFailureSafelyAsync(subscriber, failure.Category, failure.Permanent, cancellationToken);
                 continue;
             }
 
             if (!response.Success || response.Data is null)
             {
-                foreach (var subscriber in albumGroup)
-                    await RecordFailureSafelyAsync(subscriber, "LidarrUnavailable", cancellationToken);
+                var failure = ClassifyStatusCode(
+                    response.StatusCode,
+                    "LidarrUnavailable",
+                    "LidarrPermanent",
+                    "LidarrRateLimited");
+                foreach (var subscriber in subscribers)
+                    await RecordFailureSafelyAsync(subscriber, failure.Category, failure.Permanent, cancellationToken);
                 continue;
             }
 
             if (!response.Data.IsComplete)
+            {
+                var nextCheck = now.AddSeconds(Math.Clamp(_options.PendingRecheckSeconds, 10, 86_400));
+                foreach (var subscriber in subscribers)
+                    await ScheduleRecheckSafelyAsync(subscriber, nextCheck, cancellationToken);
                 continue;
+            }
 
-            var observedAt = response.Data.CompletedAtUtc ?? now;
-            foreach (var subscriber in albumGroup)
+            foreach (var subscriber in subscribers)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
+                    var correlatedHistory = response.Data.HistoryRecordId.HasValue &&
+                        response.Data.CompletedAtUtc.HasValue &&
+                        response.Data.CompletedAtUtc.Value >=
+                            subscriber.RequestedAtUtc.Subtract(HistoryClockSkewTolerance);
                     var observed = await _store.MarkCompletionObservedAsync(
                         subscriber.RequestId,
-                        response.Data.HistoryRecordId,
-                        observedAt,
+                        correlatedHistory ? response.Data.HistoryRecordId : null,
+                        correlatedHistory ? response.Data.CompletedAtUtc!.Value : now,
                         cancellationToken);
                     await SendObservedSafelyAsync(observed, cancellationToken);
                 }
@@ -104,9 +135,29 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
                 catch (Exception exception)
                 {
                     LogSafeFailure("Completion persistence", exception);
-                    await RecordFailureSafelyAsync(subscriber, "StoreUnavailable", cancellationToken);
+                    await RecordFailureSafelyAsync(
+                        subscriber, "StoreUnavailable", permanent: false, cancellationToken);
                 }
             }
+        }
+    }
+
+    private async Task ScheduleRecheckSafelyAsync(
+        MusicRequestNotificationDTO record,
+        DateTimeOffset nextCheck,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _store.SchedulePendingRecheckAsync(record.RequestId, nextCheck, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            LogSafeFailure("Completion recheck persistence", exception);
         }
     }
 
@@ -114,6 +165,13 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
         MusicRequestNotificationDTO observed,
         CancellationToken cancellationToken)
     {
+        if (observed.DmChannelId == 0)
+        {
+            await RecordFailureSafelyAsync(
+                observed, "DiscordInvalidDestination", permanent: true, cancellationToken);
+            return;
+        }
+
         try
         {
             var messageId = await _dmSender.SendCompletionAsync(observed, cancellationToken);
@@ -126,20 +184,27 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
         catch (Exception exception)
         {
             LogSafeFailure("Discord completion notification", exception);
-            await RecordFailureSafelyAsync(observed, "DiscordUnavailable", cancellationToken);
+            var failure = ClassifyDiscordFailure(exception);
+            await RecordFailureSafelyAsync(observed, failure.Category, failure.Permanent, cancellationToken);
         }
     }
 
     private async Task RecordFailureSafelyAsync(
         MusicRequestNotificationDTO record,
         string category,
+        bool permanent,
         CancellationToken cancellationToken)
     {
         try
         {
-            var nextAttempt = _timeProvider.GetUtcNow().Add(CalculateBackoff(record.AttemptCount));
-            await _store.RecordAttemptFailureAsync(
+            var nextAttempt = permanent
+                ? (DateTimeOffset?)null
+                : _timeProvider.GetUtcNow().Add(CalculateBackoff(record.AttemptCount));
+            var failed = await _store.RecordAttemptFailureAsync(
                 record.RequestId, category, nextAttempt, cancellationToken);
+            var maximumAttempts = Math.Clamp(_options.MaxAttempts, 1, MaximumAttempts);
+            if (permanent || failed.AttemptCount >= maximumAttempts)
+                await _store.MarkDeadLetterAsync(record.RequestId, category, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -153,16 +218,58 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
 
     private TimeSpan CalculateBackoff(int previousAttempts)
     {
-        var initialSeconds = Math.Max(1, _options.InitialRetryDelaySeconds);
-        var maximumSeconds = Math.Max(initialSeconds, _options.MaxRetryDelaySeconds);
+        var initialSeconds = Math.Clamp(_options.InitialRetryDelaySeconds, 1, 86_400);
+        var maximumSeconds = Math.Clamp(_options.MaxRetryDelaySeconds, initialSeconds, 86_400);
         var exponent = Math.Clamp(previousAttempts, 0, 30);
         var seconds = Math.Min(maximumSeconds, initialSeconds * Math.Pow(2, exponent));
         return TimeSpan.FromSeconds(seconds);
     }
 
+    private static FailureClassification ClassifyDiscordFailure(Exception exception)
+    {
+        if (exception is ArgumentException or InvalidDataException)
+            return new("DiscordInvalidDestination", Permanent: true);
+
+        return ClassifyHttpFailure(
+            exception,
+            "DiscordUnavailable",
+            "DiscordPermanent",
+            "DiscordRateLimited");
+    }
+
+    private static FailureClassification ClassifyHttpFailure(
+        Exception exception,
+        string transientCategory,
+        string permanentCategory,
+        string rateLimitCategory)
+    {
+        var statusCode = exception switch
+        {
+            RestException restException => (int)restException.StatusCode,
+            HttpRequestException { StatusCode: not null } httpException => (int)httpException.StatusCode.Value,
+            _ => 0,
+        };
+        return ClassifyStatusCode(statusCode, transientCategory, permanentCategory, rateLimitCategory);
+    }
+
+    private static FailureClassification ClassifyStatusCode(
+        int statusCode,
+        string transientCategory,
+        string permanentCategory,
+        string rateLimitCategory)
+    {
+        if (statusCode == (int)HttpStatusCode.TooManyRequests)
+            return new(rateLimitCategory, Permanent: false);
+        if (statusCode is >= 400 and < 500 && statusCode != (int)HttpStatusCode.RequestTimeout)
+            return new(permanentCategory, Permanent: true);
+        return new(transientCategory, Permanent: false);
+    }
+
     private void LogSafeFailure(string operation, Exception exception) =>
         _logger.LogWarning(
-            "{Operation} failed ({ExceptionType}); the durable record remains retryable.",
+            "{Operation} failed ({ExceptionType}); the durable record remains safely classified.",
             operation,
             exception.GetType().Name);
+
+    private readonly record struct FailureClassification(string Category, bool Permanent);
 }

@@ -219,6 +219,7 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
 
     public async Task<StandardResponse<LidarrAlbumCompletionDTO>> GetCompletionAsync(
         int albumId,
+        DateTimeOffset requestedAtUtc,
         CancellationToken cancellationToken = default)
     {
         if (albumId <= 0)
@@ -226,9 +227,15 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
             return StandardResponse<LidarrAlbumCompletionDTO>.ErrorResponse(
                 "A positive Lidarr album ID is required.", (int)HttpStatusCode.BadRequest);
         }
+        if (requestedAtUtc == default)
+        {
+            return StandardResponse<LidarrAlbumCompletionDTO>.ErrorResponse(
+                "A request timestamp is required.", (int)HttpStatusCode.BadRequest);
+        }
 
         try
         {
+            LidarrAlbumCompletionDTO? imported = null;
             var pageSize = Math.Clamp(_options.CompletionHistoryPageSize, 1, 100);
             var historyUri = BuildUri(
                 $"/api/v1/history?albumId={albumId}&eventType=8&page=1&pageSize={pageSize}&sortKey=date&sortDirection=descending");
@@ -238,18 +245,21 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                        HttpCompletionOption.ResponseHeadersRead,
                        cancellationToken))
             {
-                if (!historyResponse.IsSuccessStatusCode)
-                    return ApiError<LidarrAlbumCompletionDTO>(historyResponse.StatusCode);
-
-                var historyJson = await ReadBoundedContentAsync(historyResponse.Content, cancellationToken);
-                var imported = ReadDownloadImportedHistory(historyJson, albumId);
-                if (imported is not null)
+                if (historyResponse.IsSuccessStatusCode)
                 {
-                    return StandardResponse<LidarrAlbumCompletionDTO>.SuccessResponse(
-                        imported, (int)historyResponse.StatusCode);
+                    try
+                    {
+                        var historyJson = await ReadBoundedContentAsync(historyResponse.Content, cancellationToken);
+                        imported = ReadDownloadImportedHistory(historyJson, albumId, requestedAtUtc);
+                    }
+                    catch (Exception exception) when (exception is JsonException or InvalidDataException)
+                    {
+                        // History is correlation metadata only. Current album statistics remain authoritative.
+                    }
                 }
             }
 
+            // History can describe files that were later deleted. Always verify current availability.
             using var albumRequest = CreateRequest(HttpMethod.Get, BuildUri($"/api/v1/album/{albumId}"));
             using var albumResponse = await _httpClient.SendAsync(
                 albumRequest,
@@ -259,12 +269,18 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                 return ApiError<LidarrAlbumCompletionDTO>(albumResponse.StatusCode);
 
             var albumJson = await ReadBoundedContentAsync(albumResponse.Content, cancellationToken);
-            var completeFromStatistics = ReadCompleteStatistics(albumJson, albumId);
+            if (!ReadCompleteStatistics(albumJson, albumId))
+            {
+                return StandardResponse<LidarrAlbumCompletionDTO>.SuccessResponse(
+                    new LidarrAlbumCompletionDTO(false, null, null),
+                    (int)albumResponse.StatusCode);
+            }
+
             return StandardResponse<LidarrAlbumCompletionDTO>.SuccessResponse(
-                new LidarrAlbumCompletionDTO(
-                    completeFromStatistics,
+                imported ?? new LidarrAlbumCompletionDTO(
+                    true,
                     HistoryRecordId: null,
-                    CompletedAtUtc: completeFromStatistics ? DateTimeOffset.UtcNow : null),
+                    CompletedAtUtc: DateTimeOffset.UtcNow),
                 (int)albumResponse.StatusCode);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -291,8 +307,14 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         }
     }
 
-    private static LidarrAlbumCompletionDTO? ReadDownloadImportedHistory(string json, int albumId)
+    private static LidarrAlbumCompletionDTO? ReadDownloadImportedHistory(
+        string json,
+        int albumId,
+        DateTimeOffset requestedAtUtc)
     {
+        // Lidarr and the bot may differ slightly in wall-clock time. Only imports no more than
+        // two minutes before subscription creation are accepted as correlated history.
+        var earliestCorrelatedImport = requestedAtUtc.ToUniversalTime().AddMinutes(-2);
         using var document = JsonDocument.Parse(json);
         if (!document.RootElement.TryGetProperty("records", out var records) ||
             records.ValueKind != JsonValueKind.Array)
@@ -313,7 +335,11 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                 !DateTimeOffset.TryParse(dateElement.GetString(), out var completedAt))
                 continue;
 
-            return new LidarrAlbumCompletionDTO(true, historyId, completedAt.ToUniversalTime());
+            var completedAtUtc = completedAt.ToUniversalTime();
+            if (completedAtUtc < earliestCorrelatedImport)
+                continue;
+
+            return new LidarrAlbumCompletionDTO(true, historyId, completedAtUtc);
         }
 
         return null;

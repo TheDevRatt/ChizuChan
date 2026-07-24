@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ChizuChan.DTOs;
@@ -162,6 +163,27 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
                 CompletionHistoryId = completionHistoryId,
                 CompletionObservedAtUtc = observedAtUtc.ToUniversalTime(),
                 NextAttemptAtUtc = null,
+            };
+        }, cancellationToken);
+    }
+
+    public Task<MusicRequestNotificationDTO> SchedulePendingRecheckAsync(
+        Guid requestId,
+        DateTimeOffset nextAttemptAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        if (nextAttemptAtUtc == default)
+            throw new ArgumentOutOfRangeException(nameof(nextAttemptAtUtc));
+
+        return TransitionAsync(requestId, record =>
+        {
+            if (record.State != MusicRequestNotificationState.Pending)
+                throw new InvalidOperationException("Only a pending notification can schedule a completion recheck.");
+
+            return record with
+            {
+                NextAttemptAtUtc = nextAttemptAtUtc.ToUniversalTime(),
+                LastErrorCategory = null,
             };
         }, cancellationToken);
     }
@@ -482,7 +504,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
                 ? _timeProvider.GetUtcNow()
                 : notification.RequestedAtUtc.ToUniversalTime(),
             NotificationNonce = string.IsNullOrWhiteSpace(notification.NotificationNonce)
-                ? Guid.NewGuid().ToString("N")
+                ? GenerateNotificationNonce()
                 : notification.NotificationNonce.Trim(),
             CompletionHistoryId = null,
             CompletionObservedAtUtc = null,
@@ -493,6 +515,18 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         };
         ValidateStoredRecord(normalized);
         return normalized;
+    }
+
+    private static string GenerateNotificationNonce()
+    {
+        // Discord accepts at most 25 nonce characters. Eighteen random bytes encode to exactly
+        // 24 unpadded Base64URL characters while retaining 144 bits of cryptographic entropy.
+        Span<byte> random = stackalloc byte[18];
+        RandomNumberGenerator.Fill(random);
+        return Convert.ToBase64String(random)
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
     }
 
     private List<MusicRequestNotificationDTO> Prune(IEnumerable<MusicRequestNotificationDTO> source)
@@ -547,7 +581,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         ValidateStoredText(record.ForeignAlbumId, nameof(record.ForeignAlbumId), 200);
         ValidateStoredText(record.ArtistName, nameof(record.ArtistName), MaximumTextLength);
         ValidateStoredText(record.AlbumTitle, nameof(record.AlbumTitle), MaximumTextLength);
-        ValidateStoredText(record.NotificationNonce, nameof(record.NotificationNonce), 100);
+        ValidateStoredText(record.NotificationNonce, nameof(record.NotificationNonce), 25);
         if (record.RequestedAtUtc == default)
             throw new InvalidDataException("A request timestamp is required.");
         if (!Enum.IsDefined(record.State))

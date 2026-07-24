@@ -28,6 +28,11 @@ public interface IMusicRequestNotificationStore : IDisposable, IAsyncDisposable
         DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken = default);
 
+    Task<MusicRequestNotificationDTO> SchedulePendingRecheckAsync(
+        Guid requestId,
+        DateTimeOffset nextAttemptAtUtc,
+        CancellationToken cancellationToken = default);
+
     Task<MusicRequestNotificationDTO> RecordAttemptFailureAsync(
         Guid requestId,
         string errorCategory,
