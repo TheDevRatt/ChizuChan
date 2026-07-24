@@ -4,7 +4,7 @@ namespace ChizuChan.Services.Interfaces;
 
 public interface IMusicSearchSessionService
 {
-    void SaveResults(
+    MusicSearchSessionToken SaveResults(
         ulong userId,
         ulong dmChannelId,
         string query,
@@ -12,7 +12,11 @@ public interface IMusicSearchSessionService
         bool lidarrAvailable = true,
         bool youtubeAvailable = true);
 
-    bool BindMessage(ulong userId, ulong dmChannelId, ulong sourceMessageId);
+    bool BindMessage(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        MusicSearchSessionToken token);
 
     bool GetCurrent(
         ulong userId,

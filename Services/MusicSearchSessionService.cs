@@ -1,9 +1,25 @@
+using System.Collections.Immutable;
 using ChizuChan.DTOs;
 using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
 using Microsoft.Extensions.Options;
 
 namespace ChizuChan.Services;
+
+public readonly struct MusicSearchSessionToken : IEquatable<MusicSearchSessionToken>
+{
+    private readonly Guid _value;
+
+    private MusicSearchSessionToken(Guid value) => _value = value;
+
+    internal static MusicSearchSessionToken Create() => new(Guid.NewGuid());
+
+    public bool Equals(MusicSearchSessionToken other) => _value.Equals(other._value);
+    public override bool Equals(object? obj) => obj is MusicSearchSessionToken other && Equals(other);
+    public override int GetHashCode() => _value.GetHashCode();
+    public static bool operator ==(MusicSearchSessionToken left, MusicSearchSessionToken right) => left.Equals(right);
+    public static bool operator !=(MusicSearchSessionToken left, MusicSearchSessionToken right) => !left.Equals(right);
+}
 
 public class MusicSearchSessionService : IMusicSearchSessionService
 {
@@ -22,7 +38,7 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public void SaveResults(
+    public MusicSearchSessionToken SaveResults(
         ulong userId,
         ulong dmChannelId,
         string query,
@@ -33,11 +49,12 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(pages);
 
-        var savedPages = pages.Take(MaximumResults).ToArray();
+        var savedPages = pages.Take(MaximumResults).ToImmutableArray();
         if (savedPages.Any(page => page is null))
             throw new ArgumentException("Result pages cannot contain null values.", nameof(pages));
 
         var now = _timeProvider.GetUtcNow();
+        var token = MusicSearchSessionToken.Create();
         lock (_syncRoot)
         {
             RemoveExpiredSessions(now);
@@ -53,6 +70,7 @@ public class MusicSearchSessionService : IMusicSearchSessionService
                 YouTubeAvailable = youtubeAvailable,
                 SavedAt = now,
                 Sequence = _nextSequence++,
+                Token = token,
             };
 
             var maxSessions = Math.Max(0, _options.MaxSessions);
@@ -62,17 +80,27 @@ public class MusicSearchSessionService : IMusicSearchSessionService
                 _sessions.Remove(oldest.Key);
             }
         }
+
+        return token;
     }
 
-    public bool BindMessage(ulong userId, ulong dmChannelId, ulong sourceMessageId)
+    public bool BindMessage(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        MusicSearchSessionToken token)
     {
         if (sourceMessageId == 0)
             return false;
 
         lock (_syncRoot)
         {
-            if (!TryGetLiveSession(userId, out var session) || session.DmChannelId != dmChannelId)
+            if (!TryGetLiveSession(userId, out var session) ||
+                session.DmChannelId != dmChannelId ||
+                session.Token != token)
+            {
                 return false;
+            }
 
             if (session.SourceMessageId != 0 && session.SourceMessageId != sourceMessageId)
                 return false;
@@ -129,14 +157,14 @@ public class MusicSearchSessionService : IMusicSearchSessionService
 
         lock (_syncRoot)
         {
-            if (!TryGetLiveSession(userId, out var session) || oneBasedResultNumber > session.Pages.Count)
+            if (!TryGetLiveSession(userId, out var session) || oneBasedResultNumber > session.Pages.Length)
                 return false;
 
             var page = session.Pages[oneBasedResultNumber - 1];
             if (page.LidarrAlbum is null)
                 return false;
 
-            album = page.LidarrAlbum;
+            album = page.LidarrAlbum.ToDto();
             return true;
         }
     }
@@ -158,13 +186,13 @@ public class MusicSearchSessionService : IMusicSearchSessionService
     {
         lock (_syncRoot)
         {
-            if (!TryGetBoundSession(userId, dmChannelId, sourceMessageId, out var stored) || stored.Pages.Count == 0)
+            if (!TryGetBoundSession(userId, dmChannelId, sourceMessageId, out var stored) || stored.Pages.Length == 0)
             {
                 session = null!;
                 return false;
             }
 
-            stored.CurrentIndex = (stored.CurrentIndex + offset + stored.Pages.Count) % stored.Pages.Count;
+            stored.CurrentIndex = (stored.CurrentIndex + offset + stored.Pages.Length) % stored.Pages.Length;
             session = Snapshot(stored);
             return true;
         }
@@ -225,7 +253,8 @@ public class MusicSearchSessionService : IMusicSearchSessionService
     private sealed class SearchSession
     {
         public required string Query { get; init; }
-        public required IReadOnlyList<MusicSearchResultPage> Pages { get; init; }
+        public required ImmutableArray<MusicSearchResultPage> Pages { get; init; }
+        public required MusicSearchSessionToken Token { get; init; }
         public int CurrentIndex { get; set; }
         public ulong OwnerUserId { get; init; }
         public ulong DmChannelId { get; init; }
