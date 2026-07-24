@@ -23,7 +23,8 @@ public readonly struct MusicSearchSessionToken : IEquatable<MusicSearchSessionTo
 
 public class MusicSearchSessionService : IMusicSearchSessionService
 {
-    private const int MaximumResults = 10;
+    private const int MaximumUnifiedResults = 15;
+    private const int MaximumLegacyLidarrResults = 10;
     private readonly Dictionary<ulong, SearchSession> _sessions = [];
     private readonly object _syncRoot = new();
     private readonly LidarrOptions _options;
@@ -49,7 +50,7 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(pages);
 
-        var savedPages = pages.Take(MaximumResults).ToImmutableArray();
+        var savedPages = pages.Take(MaximumUnifiedResults).ToImmutableArray();
         if (savedPages.Any(page => page is null))
             throw new ArgumentException("Result pages cannot contain null values.", nameof(pages));
 
@@ -110,6 +111,29 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         }
     }
 
+    public bool GetUnboundCurrent(
+        ulong userId,
+        ulong dmChannelId,
+        MusicSearchSessionToken token,
+        out MusicSearchSessionSnapshot session)
+    {
+        lock (_syncRoot)
+        {
+            if (!TryGetLiveSession(userId, out var stored) ||
+                stored.OwnerUserId != userId ||
+                stored.DmChannelId != dmChannelId ||
+                stored.SourceMessageId != 0 ||
+                stored.Token != token)
+            {
+                session = null!;
+                return false;
+            }
+
+            session = Snapshot(stored);
+            return true;
+        }
+    }
+
     public bool GetCurrent(
         ulong userId,
         ulong dmChannelId,
@@ -146,13 +170,15 @@ public class MusicSearchSessionService : IMusicSearchSessionService
     public void SaveResults(ulong userId, IEnumerable<LidarrAlbumDTO> results)
     {
         ArgumentNullException.ThrowIfNull(results);
-        SaveResults(userId, 0, string.Empty, results.Select(MusicSearchResultPage.FromLidarr));
+        SaveResults(userId, 0, string.Empty, results
+            .Take(MaximumLegacyLidarrResults)
+            .Select(MusicSearchResultPage.FromLidarr));
     }
 
     public bool TryGetResult(ulong userId, int oneBasedResultNumber, out LidarrAlbumDTO album)
     {
         album = null!;
-        if (oneBasedResultNumber < 1 || oneBasedResultNumber > MaximumResults)
+        if (oneBasedResultNumber < 1 || oneBasedResultNumber > MaximumLegacyLidarrResults)
             return false;
 
         lock (_syncRoot)

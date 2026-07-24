@@ -2,6 +2,7 @@ using ChizuChan.DTOs;
 using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging;
 using NetCord;
 using NetCord.Rest;
 using NetCord.Services.ApplicationCommands;
@@ -16,6 +17,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly IYouTubeMusicSearchService _youtubeService;
     private readonly IMusicSearchEmbedBuilder _embedBuilder;
     private readonly LidarrOptions _options;
+    private readonly ILogger<MusicRequestCommandModule> _logger;
 
     public MusicRequestCommandModule(
         ILidarrService lidarrService,
@@ -23,7 +25,8 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         IMusicRequestAccessService accessService,
         IYouTubeMusicSearchService youtubeService,
         IMusicSearchEmbedBuilder embedBuilder,
-        IOptions<LidarrOptions> options)
+        IOptions<LidarrOptions> options,
+        ILogger<MusicRequestCommandModule> logger)
     {
         _lidarrService = lidarrService;
         _sessionService = sessionService;
@@ -31,6 +34,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         _youtubeService = youtubeService;
         _embedBuilder = embedBuilder;
         _options = options.Value;
+        _logger = logger;
     }
 
     [SlashCommand(
@@ -65,17 +69,19 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
             return;
         }
 
-        MusicSearchResultsDTO results;
+        MusicSearchCommandResult search;
         using var timeoutSource = new CancellationTokenSource(
             TimeSpan.FromSeconds(Math.Clamp(_options.SearchTimeoutSeconds, 5, 60)));
         try
         {
-            results = await MusicSearchCommandCoordinator.SearchAsync(
+            search = await MusicSearchCommandCoordinator.SearchAsync(
                 Context.User.Id,
+                Context.Channel.Id,
                 trimmedQuery,
                 _sessionService,
                 _lidarrService,
                 _youtubeService,
+                _logger,
                 timeoutSource.Token);
         }
         catch (MusicSearchInProgressException)
@@ -88,19 +94,36 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
             await ModifyResponseAsync(m => m.Content = "Music search timed out. Please try again.");
             return;
         }
-        catch
+        catch (Exception exception)
         {
+            _logger.LogWarning(
+                "Music search command failed ({ExceptionType}).",
+                exception.GetType().Name);
             await ModifyResponseAsync(m => m.Content = "Couldn't search for music right now.");
             return;
         }
 
-        var embed = _embedBuilder.Build(trimmedQuery, results);
-        await ModifyResponseAsync(message =>
+        var rendered = _embedBuilder.Build(trimmedQuery, search.Snapshot);
+        var responseMessage = await ModifyResponseAsync(message =>
         {
             message.Content = null;
-            message.Embeds = [embed];
-            message.Components = [];
+            message.Embeds = [rendered.Embed];
+            message.Components = rendered.Components;
         });
+
+        if (!_sessionService.BindMessage(
+                Context.User.Id,
+                Context.Channel.Id,
+                responseMessage.Id,
+                search.Generation))
+        {
+            await ModifyResponseAsync(message =>
+            {
+                message.Content = "This music search was superseded by a newer search. Use the newer result instead.";
+                message.Embeds = [];
+                message.Components = [];
+            });
+        }
     }
 
     [SlashCommand(
@@ -139,8 +162,11 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         {
             response = await _lidarrService.RequestAlbumAsync(selectedAlbum);
         }
-        catch
+        catch (Exception exception)
         {
+            _logger.LogWarning(
+                "Lidarr music request command failed ({ExceptionType}).",
+                exception.GetType().Name);
             await ModifyResponseAsync(m => m.Content = "Couldn't request that album right now.");
             return;
         }

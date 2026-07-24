@@ -14,10 +14,17 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
     private const int EmbedFieldValueLimit = 1024;
 
     public (EmbedProperties Embed, IMessageComponentProperties[] Components) Build(
+        MusicSearchSessionSnapshot session) => Build(session.Query, session);
+
+    public (EmbedProperties Embed, IMessageComponentProperties[] Components) Build(
+        string query,
         MusicSearchSessionSnapshot session)
     {
+        ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(session);
         ArgumentNullException.ThrowIfNull(session.Pages);
+
+        session = session with { Query = query.Trim() };
 
         var page = session.CurrentPage;
         if (page is null || (!session.LidarrAvailable && !session.YouTubeAvailable))

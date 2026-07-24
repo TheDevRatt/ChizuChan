@@ -18,6 +18,12 @@ public interface IMusicSearchSessionService
         ulong sourceMessageId,
         MusicSearchSessionToken token);
 
+    bool GetUnboundCurrent(
+        ulong userId,
+        ulong dmChannelId,
+        MusicSearchSessionToken token,
+        out MusicSearchSessionSnapshot session);
+
     bool GetCurrent(
         ulong userId,
         ulong dmChannelId,
