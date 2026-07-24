@@ -165,11 +165,34 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         var page = selection.Page;
         if (page.Kind == MusicSearchResultKind.YouTubeTrack)
         {
+            var downloadAccess = _accessService.CheckAccess(selection.OwnerUserId, MusicRequestOperation.Download);
+            if (downloadAccess.Status == MusicRequestAccessStatus.Unauthorized)
+                return MusicSearchActionResult.Failed("You don't have permission to use music requests.");
+            if (downloadAccess.Status == MusicRequestAccessStatus.RateLimited)
+            {
+                var seconds = Math.Max(1, (int)Math.Ceiling(downloadAccess.RetryAfter.TotalSeconds));
+                return MusicSearchActionResult.Failed($"Please wait {seconds}s before requesting again.");
+            }
+
             var track = page.YouTubeTrack
                 ?? throw new InvalidOperationException("A YouTube page requires track data.");
-            var youTubeResponse = await _youTubeHandler.HandleAsync(
-                selection.OwnerUserId, track.VideoId, cancellationToken);
-            return new MusicSearchActionResult(youTubeResponse.Success, youTubeResponse.Message);
+            try
+            {
+                var youTubeResponse = await _youTubeHandler.HandleAsync(
+                    selection.OwnerUserId, track.VideoId, cancellationToken);
+                return new MusicSearchActionResult(youTubeResponse.Success, youTubeResponse.Message);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    "YouTube music action provider failed ({ExceptionType}).",
+                    exception.GetType().Name);
+                return MusicSearchActionResult.Failed("Couldn't download that YouTube track right now.");
+            }
         }
 
         var access = _accessService.CheckAccess(selection.OwnerUserId, MusicRequestOperation.Request);

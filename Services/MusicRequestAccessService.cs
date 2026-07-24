@@ -79,6 +79,7 @@ public sealed class MusicRequestAccessService : IMusicRequestAccessService
     {
         MusicRequestOperation.Search => _searchCooldown,
         MusicRequestOperation.Request => _requestCooldown,
+        MusicRequestOperation.Download => _requestCooldown,
         _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null)
     };
 
@@ -101,11 +102,13 @@ public sealed class MusicRequestAccessService : IMusicRequestAccessService
     {
         private DateTimeOffset? _lastSearch;
         private DateTimeOffset? _lastRequest;
+        private DateTimeOffset? _lastDownload;
 
         public DateTimeOffset? Get(MusicRequestOperation operation) => operation switch
         {
             MusicRequestOperation.Search => _lastSearch,
             MusicRequestOperation.Request => _lastRequest,
+            MusicRequestOperation.Download => _lastDownload,
             _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, null)
         };
 
@@ -119,6 +122,9 @@ public sealed class MusicRequestAccessService : IMusicRequestAccessService
                 case MusicRequestOperation.Request:
                     _lastRequest = timestamp;
                     break;
+                case MusicRequestOperation.Download:
+                    _lastDownload = timestamp;
+                    break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(operation), operation, null);
             }
@@ -129,7 +135,8 @@ public sealed class MusicRequestAccessService : IMusicRequestAccessService
             TimeSpan searchCooldown,
             TimeSpan requestCooldown) =>
             IsActive(_lastSearch, searchCooldown, now) ||
-            IsActive(_lastRequest, requestCooldown, now);
+            IsActive(_lastRequest, requestCooldown, now) ||
+            IsActive(_lastDownload, requestCooldown, now);
 
         private static bool IsActive(
             DateTimeOffset? timestamp,

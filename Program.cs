@@ -55,6 +55,7 @@ namespace ChizuChan
             .Configure<MusicRequestNotificationOptions>(
                 builder.Configuration.GetSection(MusicRequestNotificationOptions.SectionName))
             .Configure<YouTubeMusicSearchOptions>(builder.Configuration.GetSection(YouTubeMusicSearchOptions.SectionName))
+            .Configure<YouTubeMusicDownloadOptions>(builder.Configuration.GetSection(YouTubeMusicDownloadOptions.SectionName))
             .AddAllServicesFromAssembly(typeof(Program).Assembly)
             .AddHttpClient();
 
