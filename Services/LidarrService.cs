@@ -125,7 +125,8 @@ public class LidarrService : ILidarrService
     }
 
     public async Task<StandardResponse<LidarrAlbumRequestResultDTO>> RequestAlbumAsync(
-        LidarrAlbumDTO selectedAlbum)
+        LidarrAlbumDTO selectedAlbum,
+        CancellationToken cancellationToken = default)
     {
         if (!IsCompleteAlbum(selectedAlbum))
         {
@@ -133,49 +134,70 @@ public class LidarrService : ILidarrService
                 "The selected album is invalid.", (int)HttpStatusCode.BadRequest);
         }
 
+        var foreignAlbumId = selectedAlbum.ForeignAlbumId!;
         var requestLock = AlbumRequestLocks.GetOrAdd(
-            selectedAlbum.ForeignAlbumId!, _ => new SemaphoreSlim(1, 1));
-        await requestLock.WaitAsync();
+            foreignAlbumId, _ => new SemaphoreSlim(1, 1));
+        await requestLock.WaitAsync(cancellationToken);
 
         try
         {
-            var duplicateResult = await CheckForDuplicateAsync(selectedAlbum.ForeignAlbumId!);
+            var duplicateResult = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
             if (!duplicateResult.Success)
-            {
-                return StandardResponse<LidarrAlbumRequestResultDTO>.ErrorResponse(
-                    duplicateResult.ErrorMessage ?? "Lidarr request failed.", duplicateResult.StatusCode);
-            }
+                return ForwardError<LidarrAlbumRequestResultDTO, LidarrAlbumDTO?>(duplicateResult);
 
-            if (duplicateResult.Data)
+            if (duplicateResult.Data is not null)
             {
                 return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
-                    CreateResult(selectedAlbum, alreadyExists: true));
+                    CreateResult(duplicateResult.Data, selectedAlbum, alreadyExists: true));
             }
 
             var body = CreateAddAlbumBody(selectedAlbum);
             using var request = CreateRequest(HttpMethod.Post, BuildUri("/api/v1/album"));
             request.Content = new StringContent(body, Encoding.UTF8, "application/json");
 
-            using var response = await _httpClient.SendAsync(request);
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             if (response.IsSuccessStatusCode)
             {
+                var createdAlbum = await TryReadCreatedAlbumAsync(response.Content, foreignAlbumId, cancellationToken);
+                if (createdAlbum is null)
+                {
+                    var followUp = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
+                    if (!followUp.Success)
+                        return ForwardError<LidarrAlbumRequestResultDTO, LidarrAlbumDTO?>(followUp);
+                    if (followUp.Data is null)
+                        return InvalidData<LidarrAlbumRequestResultDTO>();
+                    createdAlbum = followUp.Data;
+                }
+
                 return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
-                    CreateResult(selectedAlbum, alreadyExists: false), (int)response.StatusCode);
+                    CreateResult(createdAlbum, selectedAlbum, alreadyExists: false),
+                    (int)response.StatusCode);
             }
 
             if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Conflict)
             {
-                var conflictDuplicateResult = await CheckForDuplicateAsync(selectedAlbum.ForeignAlbumId!);
-                if (conflictDuplicateResult.Success && conflictDuplicateResult.Data)
+                var conflictResult = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
+                if (conflictResult.Success && conflictResult.Data is not null)
                 {
                     return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
-                        CreateResult(selectedAlbum, alreadyExists: true));
+                        CreateResult(conflictResult.Data, selectedAlbum, alreadyExists: true));
                 }
             }
 
             return ApiError<LidarrAlbumRequestResultDTO>(response.StatusCode);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (JsonException)
+        {
+            return InvalidData<LidarrAlbumRequestResultDTO>();
+        }
+        catch (InvalidDataException)
         {
             return InvalidData<LidarrAlbumRequestResultDTO>();
         }
@@ -195,22 +217,62 @@ public class LidarrService : ILidarrService
         }
     }
 
-    private async Task<StandardResponse<bool>> CheckForDuplicateAsync(string foreignAlbumId)
+    private async Task<StandardResponse<LidarrAlbumDTO?>> FindLocalAlbumAsync(
+        string foreignAlbumId,
+        CancellationToken cancellationToken)
     {
         var uri = BuildUri(
             $"/api/v1/album?foreignAlbumId={Uri.EscapeDataString(foreignAlbumId)}");
         using var request = CreateRequest(HttpMethod.Get, uri);
-        using var response = await _httpClient.SendAsync(request);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
         if (!response.IsSuccessStatusCode)
-            return ApiError<bool>(response.StatusCode);
+            return ApiError<LidarrAlbumDTO?>(response.StatusCode);
 
-        var content = await response.Content.ReadAsStringAsync();
+        var content = await ReadBoundedContentAsync(response.Content, cancellationToken);
         var albums = JsonSerializer.Deserialize<List<LidarrAlbumDTO?>>(content, JsonOptions);
+        cancellationToken.ThrowIfCancellationRequested();
         if (albums is null)
-            return InvalidData<bool>();
+            return InvalidData<LidarrAlbumDTO?>();
 
-        return StandardResponse<bool>.SuccessResponse(
-            albums.Any(album => album is not null), (int)response.StatusCode);
+        var matchingAlbums = albums
+            .Where(album => album is not null &&
+                string.Equals(album.ForeignAlbumId, foreignAlbumId, StringComparison.Ordinal))
+            .ToArray();
+        if (matchingAlbums.Length == 0)
+            return StandardResponse<LidarrAlbumDTO?>.SuccessResponse(null, (int)response.StatusCode);
+
+        var authoritative = matchingAlbums.FirstOrDefault(IsAuthoritativeAlbum);
+        if (authoritative is null)
+            return InvalidData<LidarrAlbumDTO?>();
+
+        return StandardResponse<LidarrAlbumDTO?>.SuccessResponse(
+            authoritative, (int)response.StatusCode);
+    }
+
+    private static async Task<LidarrAlbumDTO?> TryReadCreatedAlbumAsync(
+        HttpContent content,
+        string expectedForeignAlbumId,
+        CancellationToken cancellationToken)
+    {
+        var json = await ReadBoundedContentAsync(content, cancellationToken);
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            var album = JsonSerializer.Deserialize<LidarrAlbumDTO>(json, JsonOptions);
+            return IsAuthoritativeAlbum(album) &&
+                string.Equals(album!.ForeignAlbumId, expectedForeignAlbumId, StringComparison.Ordinal)
+                ? album
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static bool IsCompleteAlbum(LidarrAlbumDTO? album) =>
@@ -219,9 +281,16 @@ public class LidarrService : ILidarrService
         album.Artist is not null &&
         !string.IsNullOrWhiteSpace(album.Artist.ForeignArtistId);
 
+    private static bool IsAuthoritativeAlbum(LidarrAlbumDTO? album) =>
+        album is not null &&
+        album.Id is > 0 &&
+        !string.IsNullOrWhiteSpace(album.ForeignAlbumId);
+
     private string CreateAddAlbumBody(LidarrAlbumDTO selectedAlbum)
     {
         var album = JsonSerializer.SerializeToNode(selectedAlbum, JsonOptions)!.AsObject();
+        // Lookup IDs are not Lidarr database identities and must not be sent back as authoritative IDs.
+        album.Remove("id");
         album["monitored"] = true;
         album["anyReleaseOk"] = true;
         album["addOptions"] = new JsonObject
@@ -258,13 +327,22 @@ public class LidarrService : ILidarrService
         $"{_options.BaseUrl.TrimEnd('/')}{relativePath}";
 
     private static LidarrAlbumRequestResultDTO CreateResult(
-        LidarrAlbumDTO album,
+        LidarrAlbumDTO authoritativeAlbum,
+        LidarrAlbumDTO selectedAlbum,
         bool alreadyExists) => new()
     {
-        Title = album.Title ?? "Unknown album",
-        ArtistName = album.Artist?.ArtistName ?? "Unknown artist",
+        AlbumId = authoritativeAlbum.Id!.Value,
+        ForeignAlbumId = authoritativeAlbum.ForeignAlbumId!,
+        Title = authoritativeAlbum.Title ?? selectedAlbum.Title ?? "Unknown album",
+        ArtistName = authoritativeAlbum.Artist?.ArtistName ??
+            selectedAlbum.Artist?.ArtistName ?? "Unknown artist",
         AlreadyExists = alreadyExists
     };
+
+    private static StandardResponse<TTarget> ForwardError<TTarget, TSource>(
+        StandardResponse<TSource> source) =>
+        StandardResponse<TTarget>.ErrorResponse(
+            source.ErrorMessage ?? "Lidarr request failed.", source.StatusCode);
 
     private static StandardResponse<T> ApiError<T>(HttpStatusCode statusCode) =>
         StandardResponse<T>.ErrorResponse("Lidarr request failed.", (int)statusCode);

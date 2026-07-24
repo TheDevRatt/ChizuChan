@@ -30,6 +30,8 @@ public class LidarrArtistDTO
 
 public class LidarrAlbumRequestResultDTO
 {
+    public int AlbumId { get; set; }
+    public string ForeignAlbumId { get; set; } = string.Empty;
     public string Title { get; set; } = string.Empty;
     public string ArtistName { get; set; } = string.Empty;
     public bool AlreadyExists { get; set; }

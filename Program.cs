@@ -52,6 +52,8 @@ namespace ChizuChan
             .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
             .Configure<OllamaOptions>(builder.Configuration.GetSection("Ollama"))
             .Configure<LidarrOptions>(builder.Configuration.GetSection(LidarrOptions.SectionName))
+            .Configure<MusicRequestNotificationOptions>(
+                builder.Configuration.GetSection(MusicRequestNotificationOptions.SectionName))
             .Configure<YouTubeMusicSearchOptions>(builder.Configuration.GetSection(YouTubeMusicSearchOptions.SectionName))
             .AddAllServicesFromAssembly(typeof(Program).Assembly)
             .AddHttpClient();
