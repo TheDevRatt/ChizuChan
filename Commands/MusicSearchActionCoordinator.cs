@@ -43,8 +43,27 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
     private readonly IMusicRequestAccessService _accessService;
     private readonly ILidarrService _lidarrService;
     private readonly IYouTubeMusicActionHandler _youTubeHandler;
+    private readonly IMusicRequestNotificationStore? _notificationStore;
     private readonly ILogger<MusicSearchActionCoordinator> _logger;
 
+    public MusicSearchActionCoordinator(
+        IMusicSearchSessionService sessionService,
+        IMusicRequestAccessService accessService,
+        ILidarrService lidarrService,
+        IYouTubeMusicActionHandler youTubeHandler,
+        IMusicRequestNotificationStore notificationStore,
+        ILogger<MusicSearchActionCoordinator> logger)
+    {
+        _sessionService = sessionService;
+        _accessService = accessService;
+        _lidarrService = lidarrService;
+        _youTubeHandler = youTubeHandler;
+        _notificationStore = notificationStore;
+        _logger = logger;
+    }
+
+    // Compatibility constructor for narrow unit-test and non-DI callers. The application host
+    // resolves the longer constructor and always supplies the durable store.
     public MusicSearchActionCoordinator(
         IMusicSearchSessionService sessionService,
         IMusicRequestAccessService accessService,
@@ -56,6 +75,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         _accessService = accessService;
         _lidarrService = lidarrService;
         _youTubeHandler = youTubeHandler;
+        _notificationStore = null;
         _logger = logger;
     }
 
@@ -184,9 +204,46 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
             return MusicSearchActionResult.Failed("Couldn't request that release right now.");
 
         var label = $"**{Limit(response.Data.ArtistName, 70)} — {Limit(response.Data.Title, 70)}**";
-        return response.Data.AlreadyExists
-            ? MusicSearchActionResult.Succeeded($"{label} is already in Lidarr.")
-            : MusicSearchActionResult.Succeeded($"Queued {label} in Lidarr.");
+        var queuedMessage = response.Data.AlreadyExists
+            ? $"{label} is already present in Lidarr."
+            : $"Queued {label} in Lidarr.";
+
+        // Older direct callers do not have notification persistence. Production DI always uses
+        // the constructor with the store.
+        if (_notificationStore is null)
+            return MusicSearchActionResult.Succeeded(queuedMessage);
+
+        if (response.Data.AlbumId <= 0 || string.IsNullOrWhiteSpace(response.Data.ForeignAlbumId))
+            return MusicSearchActionResult.Failed("Lidarr did not return an authoritative album identity.");
+
+        try
+        {
+            await _notificationStore.AddOrGetAsync(new MusicRequestNotificationDTO
+            {
+                LidarrAlbumId = response.Data.AlbumId,
+                ForeignAlbumId = response.Data.ForeignAlbumId,
+                DiscordUserId = selection.OwnerUserId,
+                DmChannelId = selection.DmChannelId,
+                ArtistName = response.Data.ArtistName,
+                AlbumTitle = response.Data.Title,
+                State = MusicRequestNotificationState.Pending,
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "Music completion subscription could not be persisted ({ExceptionType}).",
+                exception.GetType().Name);
+            return MusicSearchActionResult.Succeeded(
+                $"{queuedMessage} I couldn't register the completion alert, so please check Plex/Plexamp later.");
+        }
+
+        return MusicSearchActionResult.Succeeded(
+            $"{queuedMessage} Chizu will DM you here when it's ready in Plex/Plexamp.");
     }
 
     private static string Limit(string value, int maximumLength) =>

@@ -12,4 +12,7 @@ public sealed class MusicRequestNotificationOptions
     public int MaxRecords { get; set; } = 10_000;
     public int TerminalRetentionDays { get; set; } = 30;
     public int MaxFileSizeBytes { get; set; } = 8 * 1024 * 1024;
+    public int PollIntervalSeconds { get; set; } = 60;
+    public int InitialRetryDelaySeconds { get; set; } = 30;
+    public int MaxRetryDelaySeconds { get; set; } = 3600;
 }

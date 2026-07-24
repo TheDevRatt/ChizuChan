@@ -141,11 +141,11 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
 
     public Task<MusicRequestNotificationDTO> MarkCompletionObservedAsync(
         Guid requestId,
-        int completionHistoryId,
+        int? completionHistoryId,
         DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken = default)
     {
-        if (completionHistoryId <= 0)
+        if (completionHistoryId is <= 0)
             throw new ArgumentOutOfRangeException(nameof(completionHistoryId));
         if (observedAtUtc == default)
             throw new ArgumentOutOfRangeException(nameof(observedAtUtc));
@@ -565,14 +565,12 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         if (record.LastErrorCategory is not null)
             ValidateStoredText(record.LastErrorCategory, nameof(record.LastErrorCategory), 100);
 
-        var hasCompletionId = record.CompletionHistoryId.HasValue;
         var hasCompletionTimestamp = record.CompletionObservedAtUtc.HasValue;
-        if (hasCompletionId != hasCompletionTimestamp)
-            throw new InvalidDataException("Completion identity and timestamp must be stored together.");
         if ((record.State is MusicRequestNotificationState.CompletionObserved or MusicRequestNotificationState.Notified) &&
-            !hasCompletionId)
-            throw new InvalidDataException("The notification state requires completion details.");
-        if (record.State == MusicRequestNotificationState.Pending && hasCompletionId)
+            !hasCompletionTimestamp)
+            throw new InvalidDataException("The notification state requires a completion timestamp.");
+        if (record.State == MusicRequestNotificationState.Pending &&
+            (record.CompletionHistoryId.HasValue || hasCompletionTimestamp))
             throw new InvalidDataException("A pending notification cannot contain completion details.");
         if (record.State == MusicRequestNotificationState.Notified && !record.NotificationMessageId.HasValue)
             throw new InvalidDataException("A notified record requires a Discord message ID.");

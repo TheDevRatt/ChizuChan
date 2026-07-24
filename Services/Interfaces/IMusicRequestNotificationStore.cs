@@ -24,7 +24,7 @@ public interface IMusicRequestNotificationStore : IDisposable, IAsyncDisposable
 
     Task<MusicRequestNotificationDTO> MarkCompletionObservedAsync(
         Guid requestId,
-        int completionHistoryId,
+        int? completionHistoryId,
         DateTimeOffset observedAtUtc,
         CancellationToken cancellationToken = default);
 

@@ -17,4 +17,5 @@ public class LidarrOptions
     public int SearchTimeoutSeconds { get; set; } = 30;
     public int RequestCooldownSeconds { get; set; } = 30;
     public int GlobalOperationsPerMinute { get; set; } = 20;
+    public int CompletionHistoryPageSize { get; set; } = 50;
 }

@@ -69,7 +69,12 @@ namespace ChizuChan
                 state.UseStore(options.OverrideStorePath, logger);
                 return state;
             });
+            // Reuse the scanner-created ILidarrService singleton so Lidarr state and HTTP
+            // configuration are not duplicated for completion polling.
+            builder.Services.AddSingleton<ILidarrCompletionReader>(sp =>
+                (ILidarrCompletionReader)sp.GetRequiredService<ILidarrService>());
             builder.Services.AddHostedService<StatusRotatorService>();
+            builder.Services.AddHostedService<MusicRequestCompletionWorker>();
 
             var host = builder.Build()
                 .AddModules(typeof(Program).Assembly);

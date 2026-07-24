@@ -16,6 +16,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly IMusicRequestAccessService _accessService;
     private readonly IYouTubeMusicSearchService _youtubeService;
     private readonly IMusicSearchEmbedBuilder _embedBuilder;
+    private readonly IMusicRequestNotificationStore _notificationStore;
     private readonly LidarrOptions _options;
     private readonly ILogger<MusicRequestCommandModule> _logger;
 
@@ -25,6 +26,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         IMusicRequestAccessService accessService,
         IYouTubeMusicSearchService youtubeService,
         IMusicSearchEmbedBuilder embedBuilder,
+        IMusicRequestNotificationStore notificationStore,
         IOptions<LidarrOptions> options,
         ILogger<MusicRequestCommandModule> logger)
     {
@@ -33,6 +35,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         _accessService = accessService;
         _youtubeService = youtubeService;
         _embedBuilder = embedBuilder;
+        _notificationStore = notificationStore;
         _options = options.Value;
         _logger = logger;
     }
@@ -181,6 +184,36 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         var content = response.Data.AlreadyExists
             ? $"{albumLabel} is already in Lidarr."
             : $"Queued {albumLabel} in Lidarr.";
+
+        if (response.Data.AlbumId <= 0 || string.IsNullOrWhiteSpace(response.Data.ForeignAlbumId))
+        {
+            content += " I couldn't register the completion alert, so please check Plex/Plexamp later.";
+            await ModifyResponseAsync(m => m.Content = content);
+            return;
+        }
+
+        try
+        {
+            await _notificationStore.AddOrGetAsync(new MusicRequestNotificationDTO
+            {
+                LidarrAlbumId = response.Data.AlbumId,
+                ForeignAlbumId = response.Data.ForeignAlbumId,
+                DiscordUserId = Context.User.Id,
+                DmChannelId = Context.Channel.Id,
+                ArtistName = response.Data.ArtistName,
+                AlbumTitle = response.Data.Title,
+                State = MusicRequestNotificationState.Pending,
+            });
+            content += " Chizu will DM you here when it's ready in Plex/Plexamp.";
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "Music completion subscription could not be persisted ({ExceptionType}).",
+                exception.GetType().Name);
+            content += " I couldn't register the completion alert, so please check Plex/Plexamp later.";
+        }
+
         await ModifyResponseAsync(m => m.Content = content);
     }
 
