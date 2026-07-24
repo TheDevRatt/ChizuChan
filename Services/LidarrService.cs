@@ -147,6 +147,11 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
 
             if (duplicateResult.Data is not null)
             {
+                var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
+                    duplicateResult.Data, searchWhenAlreadyMonitored: true, cancellationToken);
+                if (!ensured.Success)
+                    return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
+
                 return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
                     CreateResult(duplicateResult.Data, selectedAlbum, alreadyExists: true));
             }
@@ -172,6 +177,11 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                     createdAlbum = followUp.Data;
                 }
 
+                var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
+                    createdAlbum, searchWhenAlreadyMonitored: false, cancellationToken);
+                if (!ensured.Success)
+                    return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
+
                 return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
                     CreateResult(createdAlbum, selectedAlbum, alreadyExists: false),
                     (int)response.StatusCode);
@@ -182,6 +192,11 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                 var conflictResult = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
                 if (conflictResult.Success && conflictResult.Data is not null)
                 {
+                    var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
+                        conflictResult.Data, searchWhenAlreadyMonitored: true, cancellationToken);
+                    if (!ensured.Success)
+                        return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
+
                     return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
                         CreateResult(conflictResult.Data, selectedAlbum, alreadyExists: true));
                 }
@@ -215,6 +230,60 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         {
             requestLock.Release();
         }
+    }
+
+    private async Task<StandardResponse<bool>> EnsureAlbumMonitoredAndSearchedAsync(
+        LidarrAlbumDTO album,
+        bool searchWhenAlreadyMonitored,
+        CancellationToken cancellationToken)
+    {
+        if (album.AdditionalData is null ||
+            !album.AdditionalData.TryGetValue("monitored", out var monitored) ||
+            monitored.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return StandardResponse<bool>.SuccessResponse(false);
+        }
+
+        var requiresMonitoring = monitored.ValueKind == JsonValueKind.False;
+        if (!requiresMonitoring && !searchWhenAlreadyMonitored)
+            return StandardResponse<bool>.SuccessResponse(false);
+
+        if (album.Id is not > 0)
+            return InvalidData<bool>();
+
+        var albumIds = new JsonArray(album.Id.Value);
+        if (requiresMonitoring)
+        {
+            var monitorBody = new JsonObject
+            {
+                ["albumIds"] = albumIds.DeepClone(),
+                ["monitored"] = true,
+            }.ToJsonString(JsonOptions);
+            using var monitorRequest = CreateRequest(HttpMethod.Put, BuildUri("/api/v1/album/monitor"));
+            monitorRequest.Content = new StringContent(monitorBody, Encoding.UTF8, "application/json");
+            using var monitorResponse = await _httpClient.SendAsync(
+                monitorRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            if (!monitorResponse.IsSuccessStatusCode)
+                return ApiError<bool>(monitorResponse.StatusCode);
+        }
+
+        var searchBody = new JsonObject
+        {
+            ["name"] = "AlbumSearch",
+            ["albumIds"] = albumIds,
+        }.ToJsonString(JsonOptions);
+        using var searchRequest = CreateRequest(HttpMethod.Post, BuildUri("/api/v1/command"));
+        searchRequest.Content = new StringContent(searchBody, Encoding.UTF8, "application/json");
+        using var searchResponse = await _httpClient.SendAsync(
+            searchRequest,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (!searchResponse.IsSuccessStatusCode)
+            return ApiError<bool>(searchResponse.StatusCode);
+
+        return StandardResponse<bool>.SuccessResponse(true, (int)searchResponse.StatusCode);
     }
 
     public async Task<StandardResponse<LidarrAlbumCompletionDTO>> GetCompletionAsync(
