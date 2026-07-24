@@ -300,6 +300,7 @@ public class LidarrService : ILidarrService
         };
 
         var artist = album["artist"]!.AsObject();
+        artist.Remove("id");
         artist["qualityProfileId"] = _options.QualityProfileId;
         artist["metadataProfileId"] = _options.MetadataProfileId;
         artist["rootFolderPath"] = _options.RootFolderPath;

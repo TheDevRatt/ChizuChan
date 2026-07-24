@@ -166,7 +166,11 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         StandardResponse<LidarrAlbumRequestResultDTO> response;
         try
         {
-            response = await _lidarrService.RequestAlbumAsync(selectedAlbum);
+            response = await _lidarrService.RequestAlbumAsync(selectedAlbum, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {

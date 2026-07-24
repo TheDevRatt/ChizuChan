@@ -14,8 +14,10 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
     private readonly MusicRequestNotificationOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private FileStream? _storeLock;
     private List<MusicRequestNotificationDTO> _records = [];
     private bool _initialized;
+    private int _disposeState;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -33,6 +35,31 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         _options = options.Value;
         _timeProvider = timeProvider ?? TimeProvider.System;
         ValidateOptions(_options);
+        _storeLock = AcquireStoreLock(_options.StorePath);
+    }
+
+    private static FileStream AcquireStoreLock(string storePath)
+    {
+        var primaryPath = Path.GetFullPath(storePath);
+        var directory = Path.GetDirectoryName(primaryPath)
+            ?? throw new InvalidOperationException("The notification store path must have a directory.");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            return new FileStream(
+                primaryPath + ".lock",
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None,
+                bufferSize: 1,
+                FileOptions.WriteThrough);
+        }
+        catch (IOException exception)
+        {
+            throw new InvalidOperationException(
+                "Another process or store instance already owns the music notification store.",
+                exception);
+        }
     }
 
     public Task<MusicRequestNotificationDTO> AddAsync(
@@ -307,12 +334,14 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         if (document is null || document.Version != CurrentVersion || document.Records is null)
             throw new InvalidDataException("The music notification store has an unsupported format.");
 
-        if (document.Records.Count > (long)_options.MaxRecords * 2)
+        if (document.Records.Count > _options.MaxRecords)
             throw new InvalidDataException("The music notification store contains too many records.");
 
         var requestIds = new HashSet<Guid>();
         foreach (var record in document.Records)
         {
+            if (record is null)
+                throw new InvalidDataException("The music notification store contains a null record.");
             ValidateStoredRecord(record);
             if (!requestIds.Add(record.RequestId))
                 throw new InvalidDataException("The music notification store contains duplicate request IDs.");
@@ -336,6 +365,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         CancellationToken cancellationToken)
     {
         EnforceMaximum(records);
+        var documentBytes = await SerializeDocumentAsync(records, cancellationToken);
         var primaryPath = Path.GetFullPath(_options.StorePath);
         var directory = Path.GetDirectoryName(primaryPath)
             ?? throw new InvalidOperationException("The notification store path must have a directory.");
@@ -346,7 +376,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
 
         try
         {
-            await WriteDocumentAsync(tempPath, records, cancellationToken);
+            await WriteDocumentAsync(tempPath, documentBytes, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
             if (File.Exists(primaryPath))
@@ -382,6 +412,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         string primaryPath,
         CancellationToken cancellationToken)
     {
+        var documentBytes = await SerializeDocumentAsync(document.Records, cancellationToken);
         var directory = Path.GetDirectoryName(primaryPath)
             ?? throw new InvalidOperationException("The notification store path must have a directory.");
         Directory.CreateDirectory(directory);
@@ -389,7 +420,8 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
             directory, $".{Path.GetFileName(primaryPath)}.{Guid.NewGuid():N}.recovery.tmp");
         try
         {
-            await WriteDocumentAsync(tempPath, document.Records, cancellationToken);
+            await WriteDocumentAsync(tempPath, documentBytes, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(tempPath, primaryPath, overwrite: true);
         }
         finally
@@ -405,19 +437,32 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         File.Move(tempPath, primaryPath, overwrite: true);
     }
 
-    private static async Task WriteDocumentAsync(
-        string path,
+    private async Task<byte[]> SerializeDocumentAsync(
         IReadOnlyList<MusicRequestNotificationDTO> records,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920,
-            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        using var stream = new MemoryStream();
         await JsonSerializer.SerializeAsync(
             stream,
             new StoreDocument { Version = CurrentVersion, Records = records.ToList() },
             JsonOptions,
             cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (stream.Length > _options.MaxFileSizeBytes)
+            throw new InvalidDataException("The music notification store exceeds its size limit.");
+
+        return stream.ToArray();
+    }
+
+    private static async Task WriteDocumentAsync(
+        string path,
+        ReadOnlyMemory<byte> documentBytes,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920,
+            FileOptions.Asynchronous | FileOptions.WriteThrough);
+        await stream.WriteAsync(documentBytes, cancellationToken);
         await stream.FlushAsync(cancellationToken);
         stream.Flush(flushToDisk: true);
     }
@@ -429,7 +474,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
 
         var normalized = notification with
         {
-            RequestId = notification.RequestId == Guid.Empty ? Guid.NewGuid() : notification.RequestId,
+            RequestId = Guid.NewGuid(),
             ForeignAlbumId = notification.ForeignAlbumId.Trim(),
             ArtistName = notification.ArtistName.Trim(),
             AlbumTitle = notification.AlbumTitle.Trim(),
@@ -509,12 +554,32 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
             throw new InvalidDataException("The notification state is invalid.");
         if (record.CompletionHistoryId is <= 0)
             throw new InvalidDataException("The completion history ID must be positive.");
+        if (record.CompletionObservedAtUtc == default && record.CompletionObservedAtUtc is not null)
+            throw new InvalidDataException("The completion timestamp is invalid.");
         if (record.NotificationMessageId == 0)
             throw new InvalidDataException("The notification message ID must be positive.");
+        if (record.NextAttemptAtUtc == default && record.NextAttemptAtUtc is not null)
+            throw new InvalidDataException("The next-attempt timestamp is invalid.");
         if (record.AttemptCount < 0)
             throw new InvalidDataException("The attempt count cannot be negative.");
         if (record.LastErrorCategory is not null)
             ValidateStoredText(record.LastErrorCategory, nameof(record.LastErrorCategory), 100);
+
+        var hasCompletionId = record.CompletionHistoryId.HasValue;
+        var hasCompletionTimestamp = record.CompletionObservedAtUtc.HasValue;
+        if (hasCompletionId != hasCompletionTimestamp)
+            throw new InvalidDataException("Completion identity and timestamp must be stored together.");
+        if ((record.State is MusicRequestNotificationState.CompletionObserved or MusicRequestNotificationState.Notified) &&
+            !hasCompletionId)
+            throw new InvalidDataException("The notification state requires completion details.");
+        if (record.State == MusicRequestNotificationState.Pending && hasCompletionId)
+            throw new InvalidDataException("A pending notification cannot contain completion details.");
+        if (record.State == MusicRequestNotificationState.Notified && !record.NotificationMessageId.HasValue)
+            throw new InvalidDataException("A notified record requires a Discord message ID.");
+        if (record.State != MusicRequestNotificationState.Notified && record.NotificationMessageId.HasValue)
+            throw new InvalidDataException("Only a notified record can contain a Discord message ID.");
+        if (!IsActive(record.State) && record.NextAttemptAtUtc.HasValue)
+            throw new InvalidDataException("A terminal notification cannot have another attempt scheduled.");
     }
 
     private static void ValidateRequiredText(string value, string parameterName, int maxLength)
@@ -531,6 +596,29 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
 
     private static bool IsActive(MusicRequestNotificationState state) =>
         state is MusicRequestNotificationState.Pending or MusicRequestNotificationState.CompletionObserved;
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+            return;
+
+        _storeLock?.Dispose();
+        _storeLock = null;
+        _gate.Dispose();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+            return;
+
+        if (_storeLock is not null)
+        {
+            await _storeLock.DisposeAsync();
+            _storeLock = null;
+        }
+        _gate.Dispose();
+    }
 
     private static MusicRequestNotificationDTO Clone(MusicRequestNotificationDTO source) => source with { };
 

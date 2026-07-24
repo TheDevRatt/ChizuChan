@@ -2,7 +2,7 @@ using ChizuChan.DTOs;
 
 namespace ChizuChan.Services.Interfaces;
 
-public interface IMusicRequestNotificationStore
+public interface IMusicRequestNotificationStore : IDisposable, IAsyncDisposable
 {
     Task<MusicRequestNotificationDTO> AddAsync(
         MusicRequestNotificationDTO notification,
