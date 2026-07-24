@@ -3,7 +3,8 @@ namespace ChizuChan.Services.Interfaces;
 public enum MusicRequestOperation
 {
     Search,
-    Request
+    Request,
+    Download
 }
 
 public enum MusicRequestAccessStatus

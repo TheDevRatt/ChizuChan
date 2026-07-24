@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using ChizuChan.DTOs;
+using ChizuChan.Services;
 using ChizuChan.Services.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace ChizuChan.Commands;
 
@@ -12,45 +14,89 @@ public sealed class MusicSearchInProgressException : InvalidOperationException
     }
 }
 
+public sealed record MusicSearchCommandResult(
+    MusicSearchSessionToken Generation,
+    MusicSearchSessionSnapshot Snapshot);
+
 public static class MusicSearchCommandCoordinator
 {
+    private const int MaximumLidarrPages = 10;
+    private const int MaximumYouTubePages = 5;
     private static readonly ConcurrentDictionary<ulong, byte> InFlightSearches = new();
 
-    public static async Task<MusicSearchResultsDTO> SearchAsync(
+    public static async Task<MusicSearchCommandResult> SearchAsync(
         ulong userId,
+        ulong dmChannelId,
         string query,
         IMusicSearchSessionService sessionService,
         ILidarrService lidarrService,
         IYouTubeMusicSearchService youtubeService,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(query);
+        ArgumentNullException.ThrowIfNull(sessionService);
+        ArgumentNullException.ThrowIfNull(lidarrService);
+        ArgumentNullException.ThrowIfNull(youtubeService);
+        ArgumentNullException.ThrowIfNull(logger);
+
         if (!InFlightSearches.TryAdd(userId, 0))
             throw new MusicSearchInProgressException();
 
         try
         {
-            sessionService.ClearResults(userId);
             var lidarrTask = SearchLidarrAsync(lidarrService, query, cancellationToken);
             var youtubeTask = SearchYouTubeAsync(youtubeService, query, cancellationToken);
             await Task.WhenAll(lidarrTask, youtubeTask);
 
             var lidarrResponse = await lidarrTask;
             var youtubeResponse = await youtubeTask;
-            var albums = lidarrResponse.Success
-                ? lidarrResponse.Data?.Take(10).ToArray() ?? []
-                : [];
-            var youtubeTracks = youtubeResponse.Success
-                ? youtubeResponse.Data?.ToArray() ?? []
-                : [];
+            if (!lidarrResponse.Success)
+                logger.LogWarning("Lidarr music search provider is unavailable.");
+            if (!youtubeResponse.Success)
+                logger.LogWarning("YouTube music search provider is unavailable.");
 
-            sessionService.SaveResults(userId, albums);
-            return new MusicSearchResultsDTO
+            var pages = new List<MusicSearchResultPage>(MaximumLidarrPages + MaximumYouTubePages);
+
+            if (lidarrResponse.Success && lidarrResponse.Data is not null)
             {
-                Albums = albums,
-                YouTubeTracks = youtubeTracks,
-                LidarrAvailable = lidarrResponse.Success,
-                YouTubeAvailable = youtubeResponse.Success,
-            };
+                pages.AddRange(lidarrResponse.Data
+                    .Where(album => album is not null)
+                    .Take(MaximumLidarrPages)
+                    .Select(MusicSearchResultPage.FromLidarr));
+            }
+
+            if (youtubeResponse.Success && youtubeResponse.Data is not null)
+            {
+                var acceptedYouTubePages = 0;
+                foreach (var suggestion in youtubeResponse.Data)
+                {
+                    if (acceptedYouTubePages >= MaximumYouTubePages)
+                        break;
+
+                    try
+                    {
+                        pages.Add(MusicSearchResultPage.FromYouTube(suggestion));
+                        acceptedYouTubePages++;
+                    }
+                    catch (ArgumentException)
+                    {
+                        // Invalid provider suggestions are omitted; no user-controlled URL is retained.
+                    }
+                }
+            }
+
+            var generation = sessionService.SaveResults(
+                userId,
+                dmChannelId,
+                query,
+                pages,
+                lidarrResponse.Success,
+                youtubeResponse.Success);
+            if (!sessionService.GetUnboundCurrent(userId, dmChannelId, generation, out var snapshot))
+                throw new InvalidOperationException("The music search was superseded before it could be rendered.");
+
+            return new MusicSearchCommandResult(generation, snapshot);
         }
         finally
         {
@@ -72,7 +118,7 @@ public static class MusicSearchCommandCoordinator
         {
             throw;
         }
-        catch
+        catch (Exception)
         {
             return StandardResponse<IReadOnlyList<LidarrAlbumDTO>>.ErrorResponse(
                 "Lidarr search is unavailable.");
@@ -92,7 +138,7 @@ public static class MusicSearchCommandCoordinator
         {
             throw;
         }
-        catch
+        catch (Exception)
         {
             return StandardResponse<IReadOnlyList<YouTubeTrackSuggestionDTO>>.ErrorResponse(
                 "YouTube search is unavailable.");

@@ -111,6 +111,7 @@ public sealed partial class YouTubeMusicSearchService : IYouTubeMusicSearchServi
             var duration = GetDuration(entry);
             results.Add(new YouTubeTrackSuggestionDTO
             {
+                VideoId = id,
                 Title = title.Trim(),
                 Channel = GetString(entry, "channel") ?? GetString(entry, "uploader"),
                 Duration = duration,
