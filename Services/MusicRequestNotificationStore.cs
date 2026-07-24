@@ -10,7 +10,8 @@ namespace ChizuChan.Services;
 
 public sealed class MusicRequestNotificationStore : IMusicRequestNotificationStore
 {
-    private const int CurrentVersion = 1;
+    private const int CurrentVersion = 2;
+    private const int VersionOne = 1;
     private const int MaximumTextLength = 500;
     private readonly MusicRequestNotificationOptions _options;
     private readonly TimeProvider _timeProvider;
@@ -291,13 +292,16 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         var primaryPath = Path.GetFullPath(_options.StorePath);
         var backupPath = primaryPath + ".bak";
         StoreDocument? document = null;
+        var primaryRequiresMigration = false;
         Exception? primaryError = null;
 
         if (File.Exists(primaryPath))
         {
             try
             {
-                document = await ReadDocumentAsync(primaryPath, cancellationToken);
+                var read = await ReadDocumentAsync(primaryPath, cancellationToken);
+                document = read.Document;
+                primaryRequiresMigration = read.RequiresMigration;
             }
             catch (Exception ex) when (ex is JsonException or InvalidDataException or IOException)
             {
@@ -305,11 +309,15 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
             }
         }
 
+        if (document is not null && primaryRequiresMigration)
+            await PersistAsync(document.Records, cancellationToken);
+
         if (document is null && File.Exists(backupPath))
         {
             try
             {
-                document = await ReadDocumentAsync(backupPath, cancellationToken);
+                var read = await ReadDocumentAsync(backupPath, cancellationToken);
+                document = read.Document;
                 await RestorePrimaryFromBackupAsync(document, primaryPath, cancellationToken);
             }
             catch (Exception backupError) when (
@@ -340,7 +348,7 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
         _initialized = true;
     }
 
-    private async Task<StoreDocument> ReadDocumentAsync(
+    private async Task<DocumentReadResult> ReadDocumentAsync(
         string path,
         CancellationToken cancellationToken)
     {
@@ -353,14 +361,18 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
             FileOptions.Asynchronous | FileOptions.SequentialScan);
         var document = await JsonSerializer.DeserializeAsync<StoreDocument>(
             stream, JsonOptions, cancellationToken);
-        if (document is null || document.Version != CurrentVersion || document.Records is null)
+        if (document is null || document.Version is not (VersionOne or CurrentVersion) || document.Records is null)
             throw new InvalidDataException("The music notification store has an unsupported format.");
 
         if (document.Records.Count > _options.MaxRecords)
             throw new InvalidDataException("The music notification store contains too many records.");
 
+        var requiresMigration = document.Version == VersionOne;
+        var records = requiresMigration
+            ? document.Records.Select(MigrateVersionOneRecord).ToList()
+            : document.Records;
         var requestIds = new HashSet<Guid>();
-        foreach (var record in document.Records)
+        foreach (var record in records)
         {
             if (record is null)
                 throw new InvalidDataException("The music notification store contains a null record.");
@@ -369,7 +381,33 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
                 throw new InvalidDataException("The music notification store contains duplicate request IDs.");
         }
 
-        return document;
+        return new DocumentReadResult(
+            new StoreDocument { Version = CurrentVersion, Records = records },
+            requiresMigration);
+    }
+
+    private static MusicRequestNotificationDTO MigrateVersionOneRecord(
+        MusicRequestNotificationDTO? record)
+    {
+        if (record is null)
+            throw new InvalidDataException("The music notification store contains a null record.");
+
+        var nonce = record.NotificationNonce;
+        if (nonce is null || nonce.Length <= 25)
+            return record;
+        if (nonce.Length != 32 || nonce.Any(character =>
+                character is not (>= '0' and <= '9') and
+                not (>= 'a' and <= 'f') and
+                not (>= 'A' and <= 'F')))
+        {
+            throw new InvalidDataException(
+                "A version-one notification nonce is not a GUID-N hexadecimal value.");
+        }
+
+        return record with
+        {
+            NotificationNonce = nonce[..24].ToLowerInvariant(),
+        };
     }
 
     private async Task PersistPruningIfNeededAsync(CancellationToken cancellationToken)
@@ -653,6 +691,10 @@ public sealed class MusicRequestNotificationStore : IMusicRequestNotificationSto
     }
 
     private static MusicRequestNotificationDTO Clone(MusicRequestNotificationDTO source) => source with { };
+
+    private readonly record struct DocumentReadResult(
+        StoreDocument Document,
+        bool RequiresMigration);
 
     private sealed class StoreDocument
     {

@@ -17,6 +17,7 @@ namespace ChizuChan.Services;
 public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionProcessor
 {
     private const int MaximumAlbumsPerPoll = 10;
+    private const int MaximumNotificationsPerPoll = 100;
     private const int MaximumAttempts = 100;
     private static readonly TimeSpan HistoryClockSkewTolerance = TimeSpan.FromMinutes(2);
 
@@ -50,13 +51,6 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
         var due = active
             .Where(record => !record.NextAttemptAtUtc.HasValue || record.NextAttemptAtUtc <= now)
             .ToArray();
-
-        foreach (var observed in due.Where(record =>
-                     record.State == MusicRequestNotificationState.CompletionObserved))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            await SendObservedSafelyAsync(observed, cancellationToken);
-        }
 
         var maximumAlbums = Math.Clamp(_options.MaxAlbumsPerPoll, 1, MaximumAlbumsPerPoll);
         var albumGroups = due
@@ -121,12 +115,11 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
                         response.Data.CompletedAtUtc.HasValue &&
                         response.Data.CompletedAtUtc.Value >=
                             subscriber.RequestedAtUtc.Subtract(HistoryClockSkewTolerance);
-                    var observed = await _store.MarkCompletionObservedAsync(
+                    await _store.MarkCompletionObservedAsync(
                         subscriber.RequestId,
                         correlatedHistory ? response.Data.HistoryRecordId : null,
                         correlatedHistory ? response.Data.CompletedAtUtc!.Value : now,
                         cancellationToken);
-                    await SendObservedSafelyAsync(observed, cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -139,6 +132,26 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
                         subscriber, "StoreUnavailable", permanent: false, cancellationToken);
                 }
             }
+        }
+
+        // Probe a bounded pending batch before delivery so a slow observed backlog cannot prevent
+        // completion detection. Refresh afterward so newly observed records share the same bounded
+        // delivery budget as records recovered after a restart.
+        var maximumNotifications = Math.Clamp(
+            _options.MaxNotificationsPerPoll, 1, MaximumNotificationsPerPoll);
+        var observedBatch = (await _store.GetActiveAsync(cancellationToken))
+            .Where(record =>
+                record.State == MusicRequestNotificationState.CompletionObserved &&
+                (!record.NextAttemptAtUtc.HasValue || record.NextAttemptAtUtc <= now))
+            .OrderBy(record => record.NextAttemptAtUtc ?? record.CompletionObservedAtUtc ?? record.RequestedAtUtc)
+            .ThenBy(record => record.RequestId)
+            .Take(maximumNotifications)
+            .ToArray();
+
+        foreach (var observed in observedBatch)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await SendObservedSafelyAsync(observed, cancellationToken);
         }
     }
 
@@ -260,7 +273,7 @@ public sealed class MusicRequestCompletionProcessor : IMusicRequestCompletionPro
     {
         if (statusCode == (int)HttpStatusCode.TooManyRequests)
             return new(rateLimitCategory, Permanent: false);
-        if (statusCode is >= 400 and < 500 && statusCode != (int)HttpStatusCode.RequestTimeout)
+        if (statusCode is (int)HttpStatusCode.NotFound or (int)HttpStatusCode.Gone)
             return new(permanentCategory, Permanent: true);
         return new(transientCategory, Permanent: false);
     }

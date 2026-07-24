@@ -14,6 +14,7 @@ public sealed class MusicRequestNotificationOptions
     public int MaxFileSizeBytes { get; set; } = 8 * 1024 * 1024;
     public int PollIntervalSeconds { get; set; } = 60;
     public int MaxAlbumsPerPoll { get; set; } = 10;
+    public int MaxNotificationsPerPoll { get; set; } = 10;
     public int PendingRecheckSeconds { get; set; } = 60;
     public int MaxAttempts { get; set; } = 5;
     public int InitialRetryDelaySeconds { get; set; } = 30;
