@@ -14,6 +14,7 @@ namespace ChizuChan.Services;
 public class LidarrService : ILidarrService
 {
     private const string ApiKeyHeader = "X-Api-Key";
+    private const int MaximumLookupResponseBytes = 2 * 1024 * 1024;
     private readonly HttpClient _httpClient;
     private readonly LidarrOptions _options;
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> AlbumRequestLocks =
@@ -31,7 +32,9 @@ public class LidarrService : ILidarrService
         _options = options.Value;
     }
 
-    public async Task<StandardResponse<IReadOnlyList<LidarrAlbumDTO>>> SearchAlbumsAsync(string query)
+    public async Task<StandardResponse<IReadOnlyList<LidarrAlbumDTO>>> SearchAlbumsAsync(
+        string query,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
@@ -50,12 +53,17 @@ public class LidarrService : ILidarrService
         try
         {
             using var request = CreateRequest(HttpMethod.Get, uri);
-            using var response = await _httpClient.SendAsync(request);
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
             if (!response.IsSuccessStatusCode)
                 return ApiError<IReadOnlyList<LidarrAlbumDTO>>(response.StatusCode);
 
-            var content = await response.Content.ReadAsStringAsync();
+            var content = await ReadBoundedContentAsync(response.Content, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
             var albums = JsonSerializer.Deserialize<List<LidarrAlbumDTO?>>(content, JsonOptions);
+            cancellationToken.ThrowIfCancellationRequested();
             if (albums is null)
                 return InvalidData<IReadOnlyList<LidarrAlbumDTO>>();
 
@@ -67,7 +75,15 @@ public class LidarrService : ILidarrService
             return StandardResponse<IReadOnlyList<LidarrAlbumDTO>>.SuccessResponse(
                 validAlbums, (int)response.StatusCode);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (JsonException)
+        {
+            return InvalidData<IReadOnlyList<LidarrAlbumDTO>>();
+        }
+        catch (InvalidDataException)
         {
             return InvalidData<IReadOnlyList<LidarrAlbumDTO>>();
         }
@@ -81,6 +97,31 @@ public class LidarrService : ILidarrService
             return StandardResponse<IReadOnlyList<LidarrAlbumDTO>>.ErrorResponse(
                 "Lidarr search failed.");
         }
+    }
+
+    private static async Task<string> ReadBoundedContentAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength > MaximumLookupResponseBytes)
+            throw new InvalidDataException("Lidarr lookup response exceeded the allowed size.");
+
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk.AsMemory(), cancellationToken);
+            if (read == 0)
+                break;
+            if (buffer.Length + read > MaximumLookupResponseBytes)
+                throw new InvalidDataException("Lidarr lookup response exceeded the allowed size.");
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length));
     }
 
     public async Task<StandardResponse<LidarrAlbumRequestResultDTO>> RequestAlbumAsync(

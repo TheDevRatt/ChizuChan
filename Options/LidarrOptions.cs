@@ -14,6 +14,7 @@ public class LidarrOptions
     public int MaxSessions { get; set; } = 100;
     public ulong[] AllowedUserIds { get; set; } = [814996982967566367UL];
     public int SearchCooldownSeconds { get; set; } = 5;
+    public int SearchTimeoutSeconds { get; set; } = 30;
     public int RequestCooldownSeconds { get; set; } = 30;
     public int GlobalOperationsPerMinute { get; set; } = 20;
 }
