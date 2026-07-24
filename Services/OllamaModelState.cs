@@ -9,8 +9,7 @@ namespace ChizuChan.Services
         // Models that support image input
         private static readonly HashSet<string> VisionModels = new(StringComparer.OrdinalIgnoreCase)
         {
-            "gemma3:4b",
-            "gemma3:12b"
+            "gemma3:4b"
         };
 
         private volatile string _currentModel;

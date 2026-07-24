@@ -364,6 +364,9 @@ FodyWeavers.xsd
 
 # App Settings
 appsettings.json
+appsettings.*.json
+!appsettings.example.json
+secrets.json
 
 # Opus dll
 opus.dll
