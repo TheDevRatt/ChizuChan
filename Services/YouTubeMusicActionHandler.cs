@@ -38,6 +38,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             return YouTubeMusicActionResult.Failed("That YouTube track selection is invalid.");
         if (!_options.Enabled)
             return YouTubeMusicActionResult.Failed("YouTube downloads are not configured.");
+        if (!_options.RequireExclusiveLibraryRoot)
+            return YouTubeMusicActionResult.Failed("YouTube downloads are not configured correctly.");
 
         var state = AcquireVideoLock(canonicalVideoId);
         var entered = false;
@@ -76,25 +78,55 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             return YouTubeMusicActionResult.Failed("YouTube downloads are not configured correctly.");
         }
 
+        string? locksRoot = null;
         string? stagingRoot = null;
         string? stagingDirectory = null;
+        FileStream? rootOperationLock = null;
+        FileStream? processLock = null;
         var stagingWasValidated = false;
         try
         {
-            var locksRoot = Path.Combine(root, ".chizu-locks");
+            locksRoot = Path.Combine(root, ".chizu-locks");
             CreateDirectorySafely(root, locksRoot);
-            await using var processLock = await AcquireProcessLockAsync(root, locksRoot, videoId, cancellationToken);
+            EnsureLibraryRootSafe(root);
+            EnsureSafeComponents(root, locksRoot);
+            rootOperationLock = await AcquireFileLockAsync(
+                root,
+                locksRoot,
+                "root-operation.lock",
+                TimeSpan.FromSeconds(_options.GetRootLockTimeoutSeconds()),
+                rootOperation: true,
+                cancellationToken);
+
+            // The ACL-owned root is revalidated after obtaining the global lock. The lock is held
+            // through staging cleanup so every cooperating Chizu instance is a single writer.
+            EnsureLibraryRootSafe(root);
+            EnsureSafeComponents(root, locksRoot);
+            processLock = await AcquireFileLockAsync(
+                root,
+                locksRoot,
+                $"{videoId}.lock",
+                TimeSpan.FromSeconds(_options.GetRootLockTimeoutSeconds()),
+                rootOperation: false,
+                cancellationToken);
 
             EnsureLibraryRootSafe(root);
             var indexRoot = Path.Combine(root, ".chizu-index");
             CreateDirectorySafely(root, indexRoot);
             var indexPath = Path.Combine(indexRoot, $"{videoId}.json");
             var indexStatus = TryResolveIndexedDownload(
-                root, indexPath, videoId, _options.GetMaxFileSizeBytes(), out _);
-            if (indexStatus == IndexReadStatus.Valid)
+                root, indexPath, videoId, _options.GetMaxFileSizeBytes(), out var indexedDestination);
+            if (indexStatus == IndexReadStatus.Valid && indexedDestination is not null &&
+                await VerifyAudioStreamAsync(ffmpeg, indexedDestination, root, cancellationToken))
+            {
                 return AlreadyDownloaded();
-            if (indexStatus == IndexReadStatus.Invalid)
+            }
+            if (indexStatus != IndexReadStatus.Missing)
+            {
                 QuarantineInvalidIndex(root, indexRoot, indexPath);
+                if (indexedDestination is not null && File.Exists(indexedDestination))
+                    QuarantineInvalidMedia(root, indexedDestination);
+            }
 
             stagingRoot = Path.Combine(root, ".chizu-staging");
             CreateDirectorySafely(root, stagingRoot);
@@ -132,10 +164,12 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             EnsureSafeComponents(root, destination);
             if (File.Exists(destination))
             {
-                if (!IsValidM4a(destination, _options.GetMaxFileSizeBytes()))
-                    return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
-                await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
-                return AlreadyDownloaded(metadata.Artist, metadata.Title);
+                if (await VerifyAudioStreamAsync(ffmpeg, destination, stagingDirectory, cancellationToken))
+                {
+                    await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
+                    return AlreadyDownloaded(metadata.Artist, metadata.Title);
+                }
+                QuarantineInvalidMedia(root, destination);
             }
 
             var maxFileSize = _options.GetMaxFileSizeBytes();
@@ -172,6 +206,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 MaximumToolErrorCharacters), cancellationToken);
             if (tag.ExitCode != 0 || !IsValidM4a(finalStagedPath, maxFileSize))
                 return SafeFailure();
+            if (!await VerifyAudioStreamAsync(ffmpeg, finalStagedPath, stagingDirectory, cancellationToken))
+                return SafeFailure();
 
             var destinationDirectory = Path.GetDirectoryName(destination)
                 ?? throw new InvalidOperationException("Destination has no parent directory.");
@@ -180,12 +216,19 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             EnsureSafeComponents(root, stagingDirectory);
             if (File.Exists(destination))
             {
-                if (!IsValidM4a(destination, maxFileSize))
-                    return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
-                await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
-                return AlreadyDownloaded(metadata.Artist, metadata.Title);
+                if (await VerifyAudioStreamAsync(ffmpeg, destination, stagingDirectory, cancellationToken))
+                {
+                    await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
+                    return AlreadyDownloaded(metadata.Artist, metadata.Title);
+                }
+                QuarantineInvalidMedia(root, destination);
             }
 
+            EnsureLibraryRootSafe(root);
+            EnsureSafeComponents(root, locksRoot);
+            EnsureSafeComponents(root, Path.Combine(locksRoot, "root-operation.lock"));
+            EnsureSafeComponents(root, destination);
+            EnsureSafeComponents(root, finalStagedPath);
             try
             {
                 // Staging and destination are deliberately below the same configured root, so this
@@ -195,8 +238,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             catch (IOException) when (File.Exists(destination))
             {
                 EnsureSafeComponents(root, destination);
-                if (!IsValidM4a(destination, maxFileSize))
-                    return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
+                if (!await VerifyAudioStreamAsync(ffmpeg, destination, stagingDirectory, cancellationToken))
+                    return SafeFailure();
                 await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
                 return AlreadyDownloaded(metadata.Artist, metadata.Title);
             }
@@ -212,6 +255,10 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         {
             throw;
         }
+        catch (RootOperationLockUnavailableException)
+        {
+            return YouTubeMusicActionResult.Failed("The YouTube music library is busy. Please try again shortly.");
+        }
         catch (Exception exception)
         {
             LogSafe(exception, "download");
@@ -219,8 +266,19 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
         finally
         {
-            if (stagingWasValidated && stagingRoot is not null && stagingDirectory is not null)
+            if (stagingWasValidated && stagingRoot is not null && stagingDirectory is not null &&
+                rootOperationLock is not null)
+            {
                 DeleteStagingBestEffort(root, stagingRoot, stagingDirectory);
+            }
+            if (processLock is not null)
+            {
+                try { await processLock.DisposeAsync(); } catch { }
+            }
+            if (rootOperationLock is not null)
+            {
+                try { await rootOperationLock.DisposeAsync(); } catch { }
+            }
         }
     }
 
@@ -286,6 +344,43 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         ]);
         return arguments;
     }
+
+    public static IReadOnlyList<string> BuildAudioVerificationArguments(string mediaPath) =>
+    [
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+        "-i", mediaPath,
+        "-map", "0:a:0",
+        "-t", "1",
+        "-f", "null",
+        OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+    ];
+
+    private async Task<bool> VerifyAudioStreamAsync(
+        string ffmpegPath,
+        string mediaPath,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (!IsValidM4a(mediaPath, _options.GetMaxFileSizeBytes()))
+            return false;
+
+        var result = await _tool.RunAsync(new YouTubeDownloadToolInvocation(
+            ffmpegPath,
+            BuildAudioVerificationArguments(mediaPath),
+            workingDirectory,
+            TimeSpan.FromSeconds(Math.Min(30, _options.GetDownloadTimeoutSeconds())),
+            8 * 1024,
+            8 * 1024), cancellationToken);
+        return result.ExitCode == 0 && !ContainsMissingAudioError(result.StandardError);
+    }
+
+    private static bool ContainsMissingAudioError(string standardError) =>
+        standardError.Contains("matches no streams", StringComparison.OrdinalIgnoreCase) ||
+        standardError.Contains("does not contain any stream", StringComparison.OrdinalIgnoreCase) ||
+        standardError.Contains("no audio stream", StringComparison.OrdinalIgnoreCase) ||
+        standardError.Contains("audio stream not found", StringComparison.OrdinalIgnoreCase);
 
     public static bool TryParseMetadata(
         string json,
@@ -526,17 +621,20 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             throw new InvalidOperationException("A media directory escaped the configured library root.");
     }
 
-    private static async Task<FileStream> AcquireProcessLockAsync(
+    private static async Task<FileStream> AcquireFileLockAsync(
         string root,
         string locksRoot,
-        string videoId,
+        string lockFileName,
+        TimeSpan timeout,
+        bool rootOperation,
         CancellationToken cancellationToken)
     {
-        var lockPath = Path.Combine(locksRoot, $"{videoId}.lock");
-        var deadline = DateTime.UtcNow.AddSeconds(30);
+        var lockPath = Path.Combine(locksRoot, lockFileName);
+        var deadline = DateTime.UtcNow.Add(timeout);
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            EnsureLibraryRootSafe(root);
             EnsureSafeComponents(root, locksRoot);
             EnsureSafeComponents(root, lockPath);
             try
@@ -550,6 +648,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                     FileOptions.Asynchronous | FileOptions.WriteThrough);
                 try
                 {
+                    EnsureLibraryRootSafe(root);
+                    EnsureSafeComponents(root, locksRoot);
                     EnsureSafeComponents(root, lockPath);
                     if ((File.GetAttributes(lockPath) & FileAttributes.ReparsePoint) != 0)
                         throw new InvalidOperationException("The media lock file is not safe.");
@@ -561,9 +661,19 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                     throw;
                 }
             }
-            catch (IOException) when (DateTime.UtcNow < deadline)
+            catch (IOException exception)
             {
-                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+                var remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    if (rootOperation)
+                        throw new RootOperationLockUnavailableException(exception);
+                    throw;
+                }
+
+                await Task.Delay(
+                    remaining < TimeSpan.FromMilliseconds(100) ? remaining : TimeSpan.FromMilliseconds(100),
+                    cancellationToken);
             }
         }
     }
@@ -628,9 +738,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             if (!YouTubeMusicPathPolicy.IsWithinRoot(root, candidate))
                 return IndexReadStatus.Invalid;
             EnsureSafeComponents(root, candidate);
+            destination = candidate;
             if (!IsValidM4a(candidate, maximumBytes))
                 return IndexReadStatus.Invalid;
-            destination = candidate;
             return IndexReadStatus.Valid;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or
@@ -651,6 +761,27 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             $"{Path.GetFileName(indexPath)}.invalid-{Guid.NewGuid():N}");
         EnsureSafeComponents(root, quarantinePath);
         File.Move(indexPath, quarantinePath, overwrite: false);
+    }
+
+    private static void QuarantineInvalidMedia(string root, string mediaPath)
+    {
+        if (!File.Exists(mediaPath))
+            return;
+        EnsureLibraryRootSafe(root);
+        EnsureSafeComponents(root, mediaPath);
+        if ((File.GetAttributes(mediaPath) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("The invalid media file is not safe to quarantine.");
+
+        var quarantineRoot = Path.Combine(root, ".chizu-quarantine");
+        CreateDirectorySafely(root, quarantineRoot);
+        var quarantinePath = Path.Combine(
+            quarantineRoot,
+            $"{Path.GetFileNameWithoutExtension(mediaPath)}.invalid-{Guid.NewGuid():N}.m4a");
+        EnsureSafeComponents(root, quarantinePath);
+        EnsureLibraryRootSafe(root);
+        EnsureSafeComponents(root, mediaPath);
+        EnsureSafeComponents(root, quarantineRoot);
+        File.Move(mediaPath, quarantinePath, overwrite: false);
     }
 
     private static async Task WriteIndexAtomicallyAsync(
@@ -841,6 +972,14 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             if (_videoLocks.TryGetValue(videoId, out var current) && ReferenceEquals(current, state))
                 _videoLocks.Remove(videoId);
             state.Gate.Dispose();
+        }
+    }
+
+    private sealed class RootOperationLockUnavailableException : IOException
+    {
+        public RootOperationLockUnavailableException(IOException innerException)
+            : base("The root operation lock could not be acquired.", innerException)
+        {
         }
     }
 

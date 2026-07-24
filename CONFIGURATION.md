@@ -19,6 +19,15 @@ dotnet user-secrets set "Lidarr:ApiKey" "<api-key>"
 
 `appsettings.json`, environment-specific appsettings files, and `secrets.json` are ignored by Git.
 
+## YouTube music library root
+
+`YouTubeMusicDownload:RequireExclusiveLibraryRoot` must remain `true`. Configure
+`LibraryRootPath` as a dedicated root whose directory and all descendants are ACL-owned by the
+Chizu service account. Chizu must be the only account/process with write access; Plex/Plexamp
+needs read-only access. The `.chizu-locks/root-operation.lock` file coordinates cooperating Chizu
+instances, but a file lock cannot stop a malicious or misconfigured process that ignores it.
+Chizu therefore fails closed when the exclusive-root invariant is disabled.
+
 ## Production
 
 On Windows, ChizuChan automatically loads:
