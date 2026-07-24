@@ -1,4 +1,5 @@
 using ChizuChan.DTOs;
+using ChizuChan.Services;
 using ChizuChan.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 
@@ -17,6 +18,13 @@ public interface IMusicSearchActionCoordinator
         ulong dmChannelId,
         ulong sourceMessageId,
         CancellationToken cancellationToken = default);
+
+    Task<MusicSearchActionResult> ExecuteAndCommitAsync(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        Func<MusicSearchActionResult, CancellationToken, Task> commitAsync,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
@@ -26,6 +34,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
     private readonly ILidarrService _lidarrService;
     private readonly IYouTubeMusicActionHandler _youTubeHandler;
     private readonly ILogger<MusicSearchActionCoordinator> _logger;
+    private readonly IMusicSearchInteractionGate _interactionGate;
 
     public MusicSearchActionCoordinator(
         IMusicSearchSessionService sessionService,
@@ -33,19 +42,65 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         ILidarrService lidarrService,
         IYouTubeMusicActionHandler youTubeHandler,
         ILogger<MusicSearchActionCoordinator> logger)
+        : this(
+            sessionService,
+            accessService,
+            lidarrService,
+            youTubeHandler,
+            logger,
+            new MusicSearchInteractionGate())
+    {
+    }
+
+    public MusicSearchActionCoordinator(
+        IMusicSearchSessionService sessionService,
+        IMusicRequestAccessService accessService,
+        ILidarrService lidarrService,
+        IYouTubeMusicActionHandler youTubeHandler,
+        ILogger<MusicSearchActionCoordinator> logger,
+        IMusicSearchInteractionGate interactionGate)
     {
         _sessionService = sessionService;
         _accessService = accessService;
         _lidarrService = lidarrService;
         _youTubeHandler = youTubeHandler;
         _logger = logger;
+        _interactionGate = interactionGate;
     }
 
-    public async Task<MusicSearchActionResult> ExecuteAsync(
+    public Task<MusicSearchActionResult> ExecuteAsync(
         ulong userId,
         ulong dmChannelId,
         ulong sourceMessageId,
+        CancellationToken cancellationToken = default) =>
+        ExecuteAndCommitAsync(
+            userId,
+            dmChannelId,
+            sourceMessageId,
+            static (_, _) => Task.CompletedTask,
+            cancellationToken);
+
+    public async Task<MusicSearchActionResult> ExecuteAndCommitAsync(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        Func<MusicSearchActionResult, CancellationToken, Task> commitAsync,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(commitAsync);
+
+        await using var lease = await _interactionGate.EnterAsync(
+            userId, dmChannelId, sourceMessageId, cancellationToken);
+        var result = await ExecuteCoreAsync(userId, dmChannelId, sourceMessageId, cancellationToken);
+        await commitAsync(result, cancellationToken);
+        return result;
+    }
+
+    private async Task<MusicSearchActionResult> ExecuteCoreAsync(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        CancellationToken cancellationToken)
     {
         if (!_sessionService.GetCurrent(userId, dmChannelId, sourceMessageId, out var session) ||
             session.CurrentPage is not { } page)
