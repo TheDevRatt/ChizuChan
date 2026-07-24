@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -44,13 +45,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         {
             await state.Gate.WaitAsync(cancellationToken);
             entered = true;
-            if (state.Completed is { } completed &&
-                IsValidExistingFile(completed.Path, _options.GetMaxFileSizeBytes()))
-            {
-                return AlreadyDownloaded(completed.Artist, completed.Title);
-            }
-
-            return await DownloadCoreAsync(canonicalVideoId, state, cancellationToken);
+            return await DownloadCoreAsync(canonicalVideoId, cancellationToken);
         }
         finally
         {
@@ -62,7 +57,6 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
 
     private async Task<YouTubeMusicActionResult> DownloadCoreAsync(
         string videoId,
-        VideoLockState state,
         CancellationToken cancellationToken)
     {
         string root;
@@ -74,6 +68,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             ytDlp = ResolveExecutable(_options.YtDlpPath, "yt-dlp.exe", "yt-dlp");
             ffmpeg = ResolveExecutable(_options.FfmpegPath, "ffmpeg.exe", "ffmpeg");
             Directory.CreateDirectory(root);
+            EnsureLibraryRootSafe(root);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -81,11 +76,32 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             return YouTubeMusicActionResult.Failed("YouTube downloads are not configured correctly.");
         }
 
-        var stagingRoot = Path.Combine(root, ".chizu-staging");
-        var stagingDirectory = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
+        string? stagingRoot = null;
+        string? stagingDirectory = null;
+        var stagingWasValidated = false;
         try
         {
-            Directory.CreateDirectory(stagingDirectory);
+            var locksRoot = Path.Combine(root, ".chizu-locks");
+            CreateDirectorySafely(root, locksRoot);
+            await using var processLock = await AcquireProcessLockAsync(root, locksRoot, videoId, cancellationToken);
+
+            EnsureLibraryRootSafe(root);
+            var indexRoot = Path.Combine(root, ".chizu-index");
+            CreateDirectorySafely(root, indexRoot);
+            var indexPath = Path.Combine(indexRoot, $"{videoId}.json");
+            var indexStatus = TryResolveIndexedDownload(
+                root, indexPath, videoId, _options.GetMaxFileSizeBytes(), out _);
+            if (indexStatus == IndexReadStatus.Valid)
+                return AlreadyDownloaded();
+            if (indexStatus == IndexReadStatus.Invalid)
+                QuarantineInvalidIndex(root, indexRoot, indexPath);
+
+            stagingRoot = Path.Combine(root, ".chizu-staging");
+            CreateDirectorySafely(root, stagingRoot);
+            stagingDirectory = Path.Combine(stagingRoot, Guid.NewGuid().ToString("N"));
+            CreateDirectorySafely(root, stagingDirectory);
+            stagingWasValidated = true;
+
             var canonicalUrl = $"https://www.youtube.com/watch?v={videoId}";
             var timeout = TimeSpan.FromSeconds(_options.GetDownloadTimeoutSeconds());
             var metadataLimit = _options.GetMaxMetadataBytes();
@@ -113,11 +129,12 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
 
             var destination = YouTubeMusicPathPolicy.BuildDestinationPath(
                 root, metadata.Artist, metadata.Album, metadata.Title, videoId);
+            EnsureSafeComponents(root, destination);
             if (File.Exists(destination))
             {
-                if (!IsValidExistingFile(destination, _options.GetMaxFileSizeBytes()))
+                if (!IsValidM4a(destination, _options.GetMaxFileSizeBytes()))
                     return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
-                state.Completed = new(destination, metadata.Artist, metadata.Title);
+                await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
                 return AlreadyDownloaded(metadata.Artist, metadata.Title);
             }
 
@@ -139,7 +156,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 return SafeFailure();
 
             var audioPath = Path.Combine(stagingDirectory, "download.m4a");
-            if (!IsValidExistingFile(audioPath, maxFileSize))
+            if (!IsValidM4a(audioPath, maxFileSize))
                 return SafeFailure();
 
             var coverPath = FindCover(stagingDirectory, maxFileSize);
@@ -153,22 +170,40 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 timeout,
                 64 * 1024,
                 MaximumToolErrorCharacters), cancellationToken);
-            if (tag.ExitCode != 0 || !IsValidExistingFile(finalStagedPath, maxFileSize))
+            if (tag.ExitCode != 0 || !IsValidM4a(finalStagedPath, maxFileSize))
                 return SafeFailure();
 
             var destinationDirectory = Path.GetDirectoryName(destination)
                 ?? throw new InvalidOperationException("Destination has no parent directory.");
-            Directory.CreateDirectory(destinationDirectory);
+            CreateDirectorySafely(root, destinationDirectory);
+            EnsureSafeComponents(root, destination);
+            EnsureSafeComponents(root, stagingDirectory);
             if (File.Exists(destination))
             {
-                state.Completed = new(destination, metadata.Artist, metadata.Title);
+                if (!IsValidM4a(destination, maxFileSize))
+                    return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
+                await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
                 return AlreadyDownloaded(metadata.Artist, metadata.Title);
             }
 
-            // staging and destination are deliberately below the same configured root, so this
-            // non-overwriting move is an atomic same-volume promotion.
-            File.Move(finalStagedPath, destination, overwrite: false);
-            state.Completed = new(destination, metadata.Artist, metadata.Title);
+            try
+            {
+                // Staging and destination are deliberately below the same configured root, so this
+                // non-overwriting move is an atomic same-volume promotion.
+                File.Move(finalStagedPath, destination, overwrite: false);
+            }
+            catch (IOException) when (File.Exists(destination))
+            {
+                EnsureSafeComponents(root, destination);
+                if (!IsValidM4a(destination, maxFileSize))
+                    return YouTubeMusicActionResult.Failed("A conflicting library item already exists for that track.");
+                await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
+                return AlreadyDownloaded(metadata.Artist, metadata.Title);
+            }
+
+            if (!IsValidM4a(destination, maxFileSize))
+                return SafeFailure();
+            await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
             return YouTubeMusicActionResult.Succeeded(
                 $"Downloaded **{Limit(metadata.Artist, 70)} — {Limit(metadata.Title, 70)}**. " +
                 "Plex/Plexamp will pick it up on the next library scan.");
@@ -184,8 +219,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
         finally
         {
-            DeleteDirectoryBestEffort(stagingDirectory);
-            DeleteIfEmptyBestEffort(stagingRoot);
+            if (stagingWasValidated && stagingRoot is not null && stagingDirectory is not null)
+                DeleteStagingBestEffort(root, stagingRoot, stagingDirectory);
         }
     }
 
@@ -198,7 +233,6 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
     [
         "--ignore-config",
         "--no-playlist",
-        "--max-downloads", "1",
         "--match-filter", $"!is_live & !was_live & duration <= {maxDurationSeconds}",
         "--max-filesize", maxFileSizeBytes.ToString(CultureInfo.InvariantCulture),
         "--extract-audio",
@@ -279,8 +313,14 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             if (root.TryGetProperty("entries", out _))
                 return false;
             var extractor = GetString(root, "extractor");
-            if (!string.Equals(extractor, "youtube", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(extractor, "youtube", StringComparison.Ordinal))
                 return false;
+            if (root.TryGetProperty("extractor_key", out var extractorKey) &&
+                (extractorKey.ValueKind != JsonValueKind.String ||
+                 !string.Equals(extractorKey.GetString(), "Youtube", StringComparison.Ordinal)))
+            {
+                return false;
+            }
             if (!string.Equals(GetString(root, "id"), expectedVideoId, StringComparison.Ordinal))
                 return false;
             if (IsLiveOrPremiere(root))
@@ -327,11 +367,11 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
 
     private static bool IsLiveOrPremiere(JsonElement root)
     {
+        if (!string.Equals(GetString(root, "live_status"), "not_live", StringComparison.Ordinal))
+            return true;
         if (root.TryGetProperty("is_live", out var isLive) && isLive.ValueKind == JsonValueKind.True)
             return true;
-        var status = GetString(root, "live_status");
-        return !string.IsNullOrWhiteSpace(status) &&
-               !string.Equals(status, "not_live", StringComparison.OrdinalIgnoreCase);
+        return root.TryGetProperty("was_live", out var wasLive) && wasLive.ValueKind == JsonValueKind.True;
     }
 
     private static (int? Year, string? Date) ParseDate(JsonElement root)
@@ -388,7 +428,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         foreach (var name in new[] { "download.jpg", "download.jpeg" })
         {
             var path = Path.Combine(stagingDirectory, name);
-            if (IsValidExistingFile(path, Math.Min(maxFileSize, 20 * 1024 * 1024)))
+            if (IsValidBoundedFile(path, Math.Min(maxFileSize, 20 * 1024 * 1024)))
                 return path;
         }
         return null;
@@ -415,12 +455,279 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         return File.Exists(bundledPath) ? bundledPath : fallbackName;
     }
 
-    private static bool IsValidExistingFile(string path, long maximumBytes)
+    private static void EnsureLibraryRootSafe(string root)
+    {
+        var fullRoot = Path.GetFullPath(root);
+        var attributes = File.GetAttributes(fullRoot);
+        if ((attributes & FileAttributes.Directory) == 0 ||
+            (attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidOperationException("The configured library root is not a safe directory.");
+        }
+    }
+
+    private static void EnsureSafeComponents(string root, string candidate)
+    {
+        EnsureLibraryRootSafe(root);
+        var fullRoot = Path.GetFullPath(root);
+        var fullCandidate = Path.GetFullPath(candidate);
+        if (!YouTubeMusicPathPolicy.IsWithinRoot(fullRoot, fullCandidate))
+            throw new InvalidOperationException("A media path escaped the configured library root.");
+
+        var relative = Path.GetRelativePath(fullRoot, fullCandidate);
+        if (relative == ".")
+            return;
+        if (Path.IsPathRooted(relative) ||
+            relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+            relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("A media path escaped the configured library root.");
+        }
+
+        var current = fullRoot;
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current))
+                continue;
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("A reparse point was found below the media root.");
+        }
+    }
+
+    private static void CreateDirectorySafely(string root, string directory)
+    {
+        EnsureSafeComponents(root, directory);
+        var fullRoot = Path.GetFullPath(root);
+        var fullDirectory = Path.GetFullPath(directory);
+        var relative = Path.GetRelativePath(fullRoot, fullDirectory);
+        var current = fullRoot;
+        foreach (var segment in relative.Split(
+                     [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (File.Exists(current) && !Directory.Exists(current))
+                throw new InvalidOperationException("A required media directory is occupied by a file.");
+            Directory.CreateDirectory(current);
+            var attributes = File.GetAttributes(current);
+            if ((attributes & FileAttributes.Directory) == 0 ||
+                (attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidOperationException("A media directory is not safe.");
+            }
+        }
+        EnsureSafeComponents(root, fullDirectory);
+        if (!YouTubeMusicPathPolicy.IsWithinRoot(fullRoot, fullDirectory))
+            throw new InvalidOperationException("A media directory escaped the configured library root.");
+    }
+
+    private static async Task<FileStream> AcquireProcessLockAsync(
+        string root,
+        string locksRoot,
+        string videoId,
+        CancellationToken cancellationToken)
+    {
+        var lockPath = Path.Combine(locksRoot, $"{videoId}.lock");
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EnsureSafeComponents(root, locksRoot);
+            EnsureSafeComponents(root, lockPath);
+            try
+            {
+                var stream = new FileStream(
+                    lockPath,
+                    FileMode.OpenOrCreate,
+                    FileAccess.ReadWrite,
+                    FileShare.None,
+                    1,
+                    FileOptions.Asynchronous | FileOptions.WriteThrough);
+                try
+                {
+                    EnsureSafeComponents(root, lockPath);
+                    if ((File.GetAttributes(lockPath) & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("The media lock file is not safe.");
+                    return stream;
+                }
+                catch
+                {
+                    await stream.DisposeAsync();
+                    throw;
+                }
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+            }
+        }
+    }
+
+    private static IndexReadStatus TryResolveIndexedDownload(
+        string root,
+        string indexPath,
+        string expectedVideoId,
+        long maximumBytes,
+        out string? destination)
+    {
+        destination = null;
+        if (!File.Exists(indexPath))
+            return IndexReadStatus.Missing;
+
+        try
+        {
+            EnsureSafeComponents(root, indexPath);
+            var info = new FileInfo(indexPath);
+            if (!info.Exists || info.Length is <= 0 or > 16 * 1024)
+                return IndexReadStatus.Invalid;
+            var bytes = new byte[checked((int)info.Length)];
+            using (var stream = new FileStream(indexPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                if (stream.Length != bytes.Length)
+                    return IndexReadStatus.Invalid;
+                stream.ReadExactly(bytes);
+                if (stream.Position != stream.Length)
+                    return IndexReadStatus.Invalid;
+            }
+
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
+            {
+                MaxDepth = 4,
+                CommentHandling = JsonCommentHandling.Disallow,
+                AllowTrailingCommas = false,
+            });
+            var element = document.RootElement;
+            if (element.ValueKind != JsonValueKind.Object || element.EnumerateObject().Count() != 3 ||
+                !element.TryGetProperty("version", out var version) ||
+                version.ValueKind != JsonValueKind.Number || version.GetInt32() != 1 ||
+                !element.TryGetProperty("videoId", out var videoId) ||
+                videoId.ValueKind != JsonValueKind.String ||
+                !string.Equals(videoId.GetString(), expectedVideoId, StringComparison.Ordinal) ||
+                !element.TryGetProperty("relativePath", out var pathElement) ||
+                pathElement.ValueKind != JsonValueKind.String)
+            {
+                return IndexReadStatus.Invalid;
+            }
+
+            var relativePath = pathElement.GetString();
+            if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Length > 1024 ||
+                Path.IsPathRooted(relativePath) || Path.IsPathFullyQualified(relativePath) ||
+                relativePath.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries)
+                    .Any(segment => segment is "." or "..") ||
+                !relativePath.EndsWith($"[{expectedVideoId}].m4a", StringComparison.Ordinal))
+            {
+                return IndexReadStatus.Invalid;
+            }
+
+            var candidate = Path.GetFullPath(Path.Combine(root, relativePath));
+            if (!YouTubeMusicPathPolicy.IsWithinRoot(root, candidate))
+                return IndexReadStatus.Invalid;
+            EnsureSafeComponents(root, candidate);
+            if (!IsValidM4a(candidate, maximumBytes))
+                return IndexReadStatus.Invalid;
+            destination = candidate;
+            return IndexReadStatus.Valid;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or
+                                           InvalidOperationException or ArgumentException or OverflowException)
+        {
+            return IndexReadStatus.Invalid;
+        }
+    }
+
+    private static void QuarantineInvalidIndex(string root, string indexRoot, string indexPath)
+    {
+        if (!File.Exists(indexPath))
+            return;
+        EnsureSafeComponents(root, indexRoot);
+        EnsureSafeComponents(root, indexPath);
+        var quarantinePath = Path.Combine(
+            indexRoot,
+            $"{Path.GetFileName(indexPath)}.invalid-{Guid.NewGuid():N}");
+        EnsureSafeComponents(root, quarantinePath);
+        File.Move(indexPath, quarantinePath, overwrite: false);
+    }
+
+    private static async Task WriteIndexAtomicallyAsync(
+        string root,
+        string indexRoot,
+        string indexPath,
+        string videoId,
+        string destination,
+        CancellationToken cancellationToken)
+    {
+        EnsureSafeComponents(root, destination);
+        if (!IsValidM4a(destination, long.MaxValue))
+            throw new InvalidOperationException("The promoted media file is invalid.");
+        CreateDirectorySafely(root, indexRoot);
+        EnsureSafeComponents(root, indexPath);
+
+        var relativePath = Path.GetRelativePath(root, destination);
+        if (Path.IsPathRooted(relativePath) || !YouTubeMusicPathPolicy.IsWithinRoot(root, destination))
+            throw new InvalidOperationException("The indexed media path is not root-relative.");
+
+        byte[] json;
+        using (var memory = new MemoryStream())
+        {
+            using (var writer = new Utf8JsonWriter(memory))
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("version", 1);
+                writer.WriteString("videoId", videoId);
+                writer.WriteString("relativePath", relativePath);
+                writer.WriteEndObject();
+            }
+            json = memory.ToArray();
+        }
+        if (json.Length > 16 * 1024)
+            throw new InvalidOperationException("The media index record is too large.");
+
+        var temporaryPath = Path.Combine(indexRoot, $".{videoId}.{Guid.NewGuid():N}.tmp");
+        EnsureSafeComponents(root, temporaryPath);
+        try
+        {
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             4096,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await stream.WriteAsync(json, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+            }
+
+            EnsureLibraryRootSafe(root);
+            EnsureSafeComponents(root, destination);
+            EnsureSafeComponents(root, indexRoot);
+            EnsureSafeComponents(root, indexPath);
+            EnsureSafeComponents(root, temporaryPath);
+            File.Move(temporaryPath, indexPath, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                EnsureSafeComponents(root, temporaryPath);
+                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
+            }
+            catch { }
+        }
+    }
+
+    private static bool IsValidBoundedFile(string path, long maximumBytes)
     {
         try
         {
             var info = new FileInfo(path);
-            return info.Exists && info.Length > 0 && info.Length <= maximumBytes;
+            return info.Exists && info.Length > 0 && info.Length <= maximumBytes &&
+                   (info.Attributes & FileAttributes.ReparsePoint) == 0;
         }
         catch
         {
@@ -428,18 +735,73 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
     }
 
-    private static void DeleteDirectoryBestEffort(string path)
+    private static bool IsValidM4a(string path, long maximumBytes)
     {
-        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); } catch { }
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length < 16 || info.Length > maximumBytes ||
+                (info.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                !string.Equals(info.Extension, ".m4a", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var length = (int)Math.Min(info.Length, 4096);
+            Span<byte> header = length <= 512 ? stackalloc byte[length] : new byte[length];
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            stream.ReadExactly(header);
+            var boxSize = BinaryPrimitives.ReadUInt32BigEndian(header[..4]);
+            if (boxSize < 16 || boxSize > info.Length ||
+                !header.Slice(4, 4).SequenceEqual("ftyp"u8))
+            {
+                return false;
+            }
+
+            var brandBytes = Math.Min((int)boxSize, header.Length);
+            for (var offset = 8; offset + 4 <= brandBytes; offset += offset == 8 ? 8 : 4)
+            {
+                var brand = header.Slice(offset, 4);
+                if (brand.SequenceEqual("M4A "u8) || brand.SequenceEqual("M4B "u8) ||
+                    brand.SequenceEqual("isom"u8) || brand.SequenceEqual("mp41"u8) ||
+                    brand.SequenceEqual("mp42"u8))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
-    private static void DeleteIfEmptyBestEffort(string path)
+    private static void DeleteStagingBestEffort(string root, string stagingRoot, string stagingDirectory)
     {
-        try { if (Directory.Exists(path) && !Directory.EnumerateFileSystemEntries(path).Any()) Directory.Delete(path); } catch { }
+        try
+        {
+            EnsureLibraryRootSafe(root);
+            EnsureSafeComponents(root, stagingRoot);
+            EnsureSafeComponents(root, stagingDirectory);
+            if (!YouTubeMusicPathPolicy.IsWithinRoot(stagingRoot, stagingDirectory))
+                return;
+            if (Directory.Exists(stagingDirectory))
+                Directory.Delete(stagingDirectory, recursive: true);
+            EnsureSafeComponents(root, stagingRoot);
+            if (Directory.Exists(stagingRoot) && !Directory.EnumerateFileSystemEntries(stagingRoot).Any())
+                Directory.Delete(stagingRoot);
+        }
+        catch { }
     }
 
     private static YouTubeMusicActionResult SafeFailure() =>
         YouTubeMusicActionResult.Failed("Couldn't download that YouTube track right now.");
+
+    private static YouTubeMusicActionResult AlreadyDownloaded() =>
+        YouTubeMusicActionResult.Succeeded(
+            "That YouTube track is already downloaded. " +
+            "Plex/Plexamp can find it after the next library scan.");
 
     private static YouTubeMusicActionResult AlreadyDownloaded(string artist, string title) =>
         YouTubeMusicActionResult.Succeeded(
@@ -482,13 +844,17 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
     }
 
-    private sealed record CompletedDownload(string Path, string Artist, string Title);
+    private enum IndexReadStatus
+    {
+        Missing,
+        Invalid,
+        Valid,
+    }
 
     private sealed class VideoLockState
     {
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public int ReferenceCount { get; set; }
-        public CompletedDownload? Completed { get; set; }
     }
 
     [GeneratedRegex("^[A-Za-z0-9_-]{11}$", RegexOptions.CultureInvariant)]

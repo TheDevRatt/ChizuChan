@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Text;
 using ChizuChan.DTOs;
+using ChizuChan.Options;
 using ChizuChan.Services.Interfaces;
+using Microsoft.Extensions.Options;
 using NetCord;
 using NetCord.Rest;
 
@@ -14,6 +16,19 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
     private const int EmbedFieldValueLimit = 1024;
     private const int ComponentCustomIdLimit = 100;
     private const string ActionCustomIdPrefix = "music_search_action:";
+    private readonly bool _youtubeDownloadsEnabled;
+
+    public MusicSearchEmbedBuilder() : this(youtubeDownloadsEnabled: true)
+    {
+    }
+
+    public MusicSearchEmbedBuilder(IOptions<YouTubeMusicDownloadOptions> options)
+        : this(options?.Value.Enabled ?? throw new ArgumentNullException(nameof(options)))
+    {
+    }
+
+    private MusicSearchEmbedBuilder(bool youtubeDownloadsEnabled) =>
+        _youtubeDownloadsEnabled = youtubeDownloadsEnabled;
 
     public (EmbedProperties Embed, IMessageComponentProperties[] Components) Build(
         MusicSearchSessionSnapshot session) => Build(session.Query, session);
@@ -43,6 +58,7 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
             page.Kind,
             session.TotalPages,
             actionAvailable,
+            _youtubeDownloadsEnabled,
             session.ActionTokenSegment,
             session.CurrentIndex));
     }
@@ -269,6 +285,7 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
         MusicSearchResultKind kind,
         int totalPages,
         bool actionAvailable,
+        bool youtubeDownloadsEnabled,
         string actionTokenSegment,
         int index)
     {
@@ -278,6 +295,7 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
             MusicSearchResultKind.Album => "Request Album",
             MusicSearchResultKind.Single => "Request Single",
             MusicSearchResultKind.EP or MusicSearchResultKind.Release => "Request EP/Release",
+            MusicSearchResultKind.YouTubeTrack when !youtubeDownloadsEnabled => "Downloads Disabled",
             MusicSearchResultKind.YouTubeTrack => "Download Single",
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
@@ -299,7 +317,10 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
             if (actionCustomId.Length > ComponentCustomIdLimit)
                 throw new InvalidOperationException("The music search action ID exceeded the Discord component limit.");
 
-            row.Add(new ButtonProperties(actionCustomId, actionLabel, ButtonStyle.Success));
+            row.Add(new ButtonProperties(actionCustomId, actionLabel, ButtonStyle.Success)
+            {
+                Disabled = kind == MusicSearchResultKind.YouTubeTrack && !youtubeDownloadsEnabled,
+            });
         }
 
         return [row];
