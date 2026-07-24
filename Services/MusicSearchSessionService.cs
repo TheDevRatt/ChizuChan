@@ -21,6 +21,32 @@ public readonly struct MusicSearchSessionToken : IEquatable<MusicSearchSessionTo
     public static bool operator !=(MusicSearchSessionToken left, MusicSearchSessionToken right) => !left.Equals(right);
 }
 
+/// <summary>
+/// A detached immutable selection captured from one exact bound search session.
+/// </summary>
+public sealed record MusicSearchSelectionSnapshot
+{
+    internal MusicSearchSelectionSnapshot(
+        MusicSearchSessionToken sessionToken,
+        ulong ownerUserId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        MusicSearchResultPage page)
+    {
+        SessionToken = sessionToken;
+        OwnerUserId = ownerUserId;
+        DmChannelId = dmChannelId;
+        SourceMessageId = sourceMessageId;
+        Page = page;
+    }
+
+    public MusicSearchSessionToken SessionToken { get; }
+    public ulong OwnerUserId { get; }
+    public ulong DmChannelId { get; }
+    public ulong SourceMessageId { get; }
+    public MusicSearchResultPage Page { get; }
+}
+
 public class MusicSearchSessionService : IMusicSearchSessionService
 {
     private const int MaximumUnifiedResults = 15;
@@ -149,6 +175,32 @@ public class MusicSearchSessionService : IMusicSearchSessionService
             }
 
             session = Snapshot(stored);
+            return true;
+        }
+    }
+
+    public bool TryCaptureCurrentSelection(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        out MusicSearchSelectionSnapshot selection)
+    {
+        lock (_syncRoot)
+        {
+            if (!TryGetBoundSession(userId, dmChannelId, sourceMessageId, out var stored) ||
+                stored.CurrentIndex < 0 ||
+                stored.CurrentIndex >= stored.Pages.Length)
+            {
+                selection = null!;
+                return false;
+            }
+
+            selection = new MusicSearchSelectionSnapshot(
+                stored.Token,
+                stored.OwnerUserId,
+                stored.DmChannelId,
+                stored.SourceMessageId,
+                stored.Pages[stored.CurrentIndex]);
             return true;
         }
     }

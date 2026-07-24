@@ -30,6 +30,12 @@ public interface IMusicSearchSessionService
         ulong sourceMessageId,
         out MusicSearchSessionSnapshot session);
 
+    bool TryCaptureCurrentSelection(
+        ulong userId,
+        ulong dmChannelId,
+        ulong sourceMessageId,
+        out MusicSearchSelectionSnapshot selection);
+
     bool MovePrevious(
         ulong userId,
         ulong dmChannelId,

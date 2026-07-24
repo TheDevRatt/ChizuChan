@@ -27,14 +27,12 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Mes
     public Task NextAsync() => NavigateAsync(moveNext: true);
 
     [ComponentInteraction("music_search_action")]
-    public async Task ActionAsync()
-    {
-        await RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral));
-
-        await _actionCoordinator.ExecuteAndCommitAsync(
+    public Task ActionAsync() =>
+        _actionCoordinator.ExecuteAndCommitAsync(
             Context.User.Id,
             Context.Channel.Id,
             Context.Interaction.Message.Id,
+            _ => RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral)),
             async (result, _) =>
             {
                 await ModifyResponseAsync(message =>
@@ -44,7 +42,6 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Mes
                     message.Components = [];
                 });
             });
-    }
 
     private async Task NavigateAsync(bool moveNext)
     {

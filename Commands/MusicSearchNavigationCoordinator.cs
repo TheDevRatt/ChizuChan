@@ -53,10 +53,10 @@ public sealed class MusicSearchNavigationCoordinator : IMusicSearchNavigationCoo
         ArgumentNullException.ThrowIfNull(acknowledgeAsync);
         ArgumentNullException.ThrowIfNull(modifyMessageAsync);
 
+        await acknowledgeAsync(cancellationToken);
+
         await using var lease = await _interactionGate.EnterAsync(
             userId, dmChannelId, sourceMessageId, cancellationToken);
-
-        await acknowledgeAsync(cancellationToken);
 
         var found = moveNext
             ? _sessionService.MoveNext(userId, dmChannelId, sourceMessageId, out var snapshot)
