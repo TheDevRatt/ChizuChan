@@ -350,6 +350,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         "-hide_banner",
         "-loglevel", "error",
         "-nostdin",
+        "-xerror",
         "-i", mediaPath,
         "-map", "0:a:0",
         "-t", "1",
@@ -373,14 +374,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             TimeSpan.FromSeconds(Math.Min(30, _options.GetDownloadTimeoutSeconds())),
             8 * 1024,
             8 * 1024), cancellationToken);
-        return result.ExitCode == 0 && !ContainsMissingAudioError(result.StandardError);
+        return result.ExitCode == 0 && string.IsNullOrWhiteSpace(result.StandardError);
     }
-
-    private static bool ContainsMissingAudioError(string standardError) =>
-        standardError.Contains("matches no streams", StringComparison.OrdinalIgnoreCase) ||
-        standardError.Contains("does not contain any stream", StringComparison.OrdinalIgnoreCase) ||
-        standardError.Contains("no audio stream", StringComparison.OrdinalIgnoreCase) ||
-        standardError.Contains("audio stream not found", StringComparison.OrdinalIgnoreCase);
 
     public static bool TryParseMetadata(
         string json,
