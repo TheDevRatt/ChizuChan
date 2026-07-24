@@ -32,6 +32,8 @@ namespace ChizuChan
             });
             builder.Logging.SetMinimumLevel(LogLevel.Information);
 
+            builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+
             builder.Services.AddDiscordGateway(options =>
             {
                 options.Intents = NetCord.Gateway.GatewayIntents.All;
@@ -47,6 +49,7 @@ namespace ChizuChan
             .AddComponentInteractions()
             .Configure<ApiKeyOptions>(builder.Configuration.GetSection("ApiKeys"))
             .Configure<OllamaOptions>(builder.Configuration.GetSection("Ollama"))
+            .Configure<LidarrOptions>(builder.Configuration.GetSection(LidarrOptions.SectionName))
             .AddAllServicesFromAssembly(typeof(Program).Assembly)
             .AddHttpClient();
 
