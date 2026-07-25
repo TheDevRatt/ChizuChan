@@ -17,7 +17,7 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
     private const int MaximumLookupResponseBytes = 2 * 1024 * 1024;
     private readonly HttpClient _httpClient;
     private readonly LidarrOptions _options;
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> AlbumRequestLocks =
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ArtistRequestLocks =
         new(StringComparer.Ordinal);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -135,8 +135,12 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         }
 
         var foreignAlbumId = selectedAlbum.ForeignAlbumId!;
-        var requestLock = AlbumRequestLocks.GetOrAdd(
-            foreignAlbumId, _ => new SemaphoreSlim(1, 1));
+        var suppliedForeignArtistId = selectedAlbum.Artist!.ForeignArtistId!.Trim();
+        var foreignArtistId = Guid.TryParse(suppliedForeignArtistId, out var musicBrainzArtistId)
+            ? musicBrainzArtistId.ToString("D")
+            : suppliedForeignArtistId;
+        var requestLock = ArtistRequestLocks.GetOrAdd(
+            foreignArtistId, _ => new SemaphoreSlim(1, 1));
         await requestLock.WaitAsync(cancellationToken);
 
         try
@@ -148,12 +152,22 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
             if (duplicateResult.Data is not null)
             {
                 var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
-                    duplicateResult.Data, searchWhenAlreadyMonitored: true, cancellationToken);
+                    duplicateResult.Data, cancellationToken);
                 if (!ensured.Success)
                     return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
 
                 return StandardResponse<LidarrAlbumRequestResultDTO>.SuccessResponse(
                     CreateResult(duplicateResult.Data, selectedAlbum, alreadyExists: true));
+            }
+
+            var artistResult = await FindLocalArtistAsync(foreignArtistId, cancellationToken);
+            if (!artistResult.Success)
+                return ForwardError<LidarrAlbumRequestResultDTO, LidarrArtistDTO?>(artistResult);
+            if (artistResult.Data is not null)
+            {
+                var ensuredArtist = await EnsureArtistMonitoredAsync(artistResult.Data, cancellationToken);
+                if (!ensuredArtist.Success)
+                    return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensuredArtist);
             }
 
             var body = CreateAddAlbumBody(selectedAlbum);
@@ -166,19 +180,15 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                 cancellationToken);
             if (response.IsSuccessStatusCode)
             {
-                var createdAlbum = await TryReadCreatedAlbumAsync(response.Content, foreignAlbumId, cancellationToken);
-                if (createdAlbum is null)
-                {
-                    var followUp = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
-                    if (!followUp.Success)
-                        return ForwardError<LidarrAlbumRequestResultDTO, LidarrAlbumDTO?>(followUp);
-                    if (followUp.Data is null)
-                        return InvalidData<LidarrAlbumRequestResultDTO>();
-                    createdAlbum = followUp.Data;
-                }
+                var followUp = await FindLocalAlbumAsync(foreignAlbumId, cancellationToken);
+                if (!followUp.Success)
+                    return ForwardError<LidarrAlbumRequestResultDTO, LidarrAlbumDTO?>(followUp);
+                if (followUp.Data is null)
+                    return InvalidData<LidarrAlbumRequestResultDTO>();
+                var createdAlbum = followUp.Data;
 
                 var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
-                    createdAlbum, searchWhenAlreadyMonitored: false, cancellationToken);
+                    createdAlbum, cancellationToken);
                 if (!ensured.Success)
                     return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
 
@@ -193,7 +203,7 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
                 if (conflictResult.Success && conflictResult.Data is not null)
                 {
                     var ensured = await EnsureAlbumMonitoredAndSearchedAsync(
-                        conflictResult.Data, searchWhenAlreadyMonitored: true, cancellationToken);
+                        conflictResult.Data, cancellationToken);
                     if (!ensured.Success)
                         return ForwardError<LidarrAlbumRequestResultDTO, bool>(ensured);
 
@@ -234,40 +244,29 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
 
     private async Task<StandardResponse<bool>> EnsureAlbumMonitoredAndSearchedAsync(
         LidarrAlbumDTO album,
-        bool searchWhenAlreadyMonitored,
         CancellationToken cancellationToken)
     {
-        if (album.AdditionalData is null ||
-            !album.AdditionalData.TryGetValue("monitored", out var monitored) ||
-            monitored.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-        {
-            return StandardResponse<bool>.SuccessResponse(false);
-        }
-
-        var requiresMonitoring = monitored.ValueKind == JsonValueKind.False;
-        if (!requiresMonitoring && !searchWhenAlreadyMonitored)
-            return StandardResponse<bool>.SuccessResponse(false);
-
-        if (album.Id is not > 0)
+        if (album.Id is not > 0 || album.Artist?.Id is not > 0)
             return InvalidData<bool>();
 
+        var artistResult = await EnsureArtistMonitoredAsync(album.Artist, cancellationToken);
+        if (!artistResult.Success)
+            return artistResult;
+
         var albumIds = new JsonArray(album.Id.Value);
-        if (requiresMonitoring)
+        var monitorBody = new JsonObject
         {
-            var monitorBody = new JsonObject
-            {
-                ["albumIds"] = albumIds.DeepClone(),
-                ["monitored"] = true,
-            }.ToJsonString(JsonOptions);
-            using var monitorRequest = CreateRequest(HttpMethod.Put, BuildUri("/api/v1/album/monitor"));
-            monitorRequest.Content = new StringContent(monitorBody, Encoding.UTF8, "application/json");
-            using var monitorResponse = await _httpClient.SendAsync(
-                monitorRequest,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
-            if (!monitorResponse.IsSuccessStatusCode)
-                return ApiError<bool>(monitorResponse.StatusCode);
-        }
+            ["albumIds"] = albumIds.DeepClone(),
+            ["monitored"] = true,
+        }.ToJsonString(JsonOptions);
+        using var monitorRequest = CreateRequest(HttpMethod.Put, BuildUri("/api/v1/album/monitor"));
+        monitorRequest.Content = new StringContent(monitorBody, Encoding.UTF8, "application/json");
+        using var monitorResponse = await _httpClient.SendAsync(
+            monitorRequest,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (!monitorResponse.IsSuccessStatusCode)
+            return ApiError<bool>(monitorResponse.StatusCode);
 
         var searchBody = new JsonObject
         {
@@ -284,6 +283,28 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
             return ApiError<bool>(searchResponse.StatusCode);
 
         return StandardResponse<bool>.SuccessResponse(true, (int)searchResponse.StatusCode);
+    }
+
+    private async Task<StandardResponse<bool>> EnsureArtistMonitoredAsync(
+        LidarrArtistDTO artist,
+        CancellationToken cancellationToken)
+    {
+        var body = new JsonObject
+        {
+            ["artistIds"] = new JsonArray(artist.Id!.Value),
+            ["monitored"] = true,
+            ["monitorNewItems"] = "none",
+        }.ToJsonString(JsonOptions);
+        using var request = CreateRequest(HttpMethod.Put, BuildUri("/api/v1/artist/editor"));
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            return ApiError<bool>(response.StatusCode);
+
+        return StandardResponse<bool>.SuccessResponse(true, (int)response.StatusCode);
     }
 
     public async Task<StandardResponse<LidarrAlbumCompletionDTO>> GetCompletionAsync(
@@ -484,27 +505,39 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
             authoritative, (int)response.StatusCode);
     }
 
-    private static async Task<LidarrAlbumDTO?> TryReadCreatedAlbumAsync(
-        HttpContent content,
-        string expectedForeignAlbumId,
+    private async Task<StandardResponse<LidarrArtistDTO?>> FindLocalArtistAsync(
+        string foreignArtistId,
         CancellationToken cancellationToken)
     {
-        var json = await ReadBoundedContentAsync(content, cancellationToken);
-        if (string.IsNullOrWhiteSpace(json))
-            return null;
+        var uri = BuildUri(
+            $"/api/v1/artist?mbId={Uri.EscapeDataString(foreignArtistId)}");
+        using var request = CreateRequest(HttpMethod.Get, uri);
+        using var response = await _httpClient.SendAsync(
+            request,
+            HttpCompletionOption.ResponseHeadersRead,
+            cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            return ApiError<LidarrArtistDTO?>(response.StatusCode);
 
-        try
-        {
-            var album = JsonSerializer.Deserialize<LidarrAlbumDTO>(json, JsonOptions);
-            return IsAuthoritativeAlbum(album) &&
-                string.Equals(album!.ForeignAlbumId, expectedForeignAlbumId, StringComparison.Ordinal)
-                ? album
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
+        var content = await ReadBoundedContentAsync(response.Content, cancellationToken);
+        var artists = JsonSerializer.Deserialize<List<LidarrArtistDTO?>>(content, JsonOptions);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (artists is null)
+            return InvalidData<LidarrArtistDTO?>();
+
+        var matchingArtists = artists
+            .Where(artist => artist is not null &&
+                string.Equals(artist.ForeignArtistId, foreignArtistId, StringComparison.Ordinal))
+            .ToArray();
+        if (matchingArtists.Length == 0)
+            return StandardResponse<LidarrArtistDTO?>.SuccessResponse(null, (int)response.StatusCode);
+
+        var authoritative = matchingArtists.FirstOrDefault(IsAuthoritativeArtist);
+        if (authoritative is null)
+            return InvalidData<LidarrArtistDTO?>();
+
+        return StandardResponse<LidarrArtistDTO?>.SuccessResponse(
+            authoritative, (int)response.StatusCode);
     }
 
     private static bool IsCompleteAlbum(LidarrAlbumDTO? album) =>
@@ -518,6 +551,11 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         album.Id is > 0 &&
         !string.IsNullOrWhiteSpace(album.ForeignAlbumId);
 
+    private static bool IsAuthoritativeArtist(LidarrArtistDTO? artist) =>
+        artist is not null &&
+        artist.Id is > 0 &&
+        !string.IsNullOrWhiteSpace(artist.ForeignArtistId);
+
     private string CreateAddAlbumBody(LidarrAlbumDTO selectedAlbum)
     {
         var album = JsonSerializer.SerializeToNode(selectedAlbum, JsonOptions)!.AsObject();
@@ -528,7 +566,7 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         album["addOptions"] = new JsonObject
         {
             ["addType"] = "manual",
-            ["searchForNewAlbum"] = true
+            ["searchForNewAlbum"] = false
         };
 
         var artist = album["artist"]!.AsObject();
@@ -536,15 +574,9 @@ public class LidarrService : ILidarrService, ILidarrCompletionReader
         artist["qualityProfileId"] = _options.QualityProfileId;
         artist["metadataProfileId"] = _options.MetadataProfileId;
         artist["rootFolderPath"] = _options.RootFolderPath;
-        artist["monitored"] = false;
+        artist["monitored"] = true;
         artist["monitorNewItems"] = "none";
-        artist["addOptions"] = new JsonObject
-        {
-            ["monitor"] = "none",
-            ["albumsToMonitor"] = new JsonArray(),
-            ["monitored"] = false,
-            ["searchForMissingAlbums"] = false
-        };
+        artist.Remove("addOptions");
 
         return album.ToJsonString(JsonOptions);
     }
