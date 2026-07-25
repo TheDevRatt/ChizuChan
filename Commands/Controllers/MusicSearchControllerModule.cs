@@ -4,7 +4,7 @@ using NetCord.Services.ComponentInteractions;
 
 namespace ChizuChan.Commands.Controllers;
 
-public sealed class MusicSearchControllerModule : ComponentInteractionModule<MessageComponentInteractionContext>
+public sealed class MusicSearchControllerModule : ComponentInteractionModule<ComponentInteractionContext>
 {
     private readonly IMusicSearchNavigationCoordinator _navigationCoordinator;
     private readonly IMusicSearchActionCoordinator _actionCoordinator;
@@ -27,11 +27,13 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Mes
     public Task NextAsync() => NavigateAsync(moveNext: true);
 
     [ComponentInteraction("music_search_action")]
-    public Task ActionAsync(string actionTokenSegment, int index) =>
-        _actionCoordinator.ExecuteAndCommitAsync(
+    public Task ActionAsync(string actionTokenSegment, int index)
+    {
+        var sourceMessageId = ((MessageComponentInteraction)Context.Interaction).Message.Id;
+        return _actionCoordinator.ExecuteAndCommitAsync(
             Context.User.Id,
             Context.Channel.Id,
-            Context.Interaction.Message.Id,
+            sourceMessageId,
             actionTokenSegment,
             index,
             _ => RespondAsync(InteractionCallback.DeferredMessage(MessageFlags.Ephemeral)),
@@ -44,10 +46,11 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Mes
                     message.Components = [];
                 });
             });
+    }
 
     private async Task NavigateAsync(bool moveNext)
     {
-        var sourceMessageId = Context.Interaction.Message.Id;
+        var sourceMessageId = ((MessageComponentInteraction)Context.Interaction).Message.Id;
         await _navigationCoordinator.NavigateAsync(
             Context.User.Id,
             Context.Channel.Id,
