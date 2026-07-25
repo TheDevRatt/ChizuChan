@@ -12,6 +12,8 @@ namespace ChizuChan.Services;
 public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandler
 {
     private const int MaximumToolErrorCharacters = 32 * 1024;
+    private const string MetadataProjection =
+        "%(.{_type,extractor,extractor_key,id,live_status,is_live,was_live,duration,track,title,artist,uploader,channel,album,genre,release_year,release_date,upload_date})j";
     private readonly IYouTubeDownloadTool _tool;
     private readonly YouTubeMusicDownloadOptions _options;
     private readonly ILogger<YouTubeMusicActionHandler> _logger;
@@ -142,7 +144,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 "--ignore-config",
                 "--no-playlist",
                 "--skip-download",
-                "--dump-single-json",
+                "--print",
+                MetadataProjection,
                 "--no-warnings",
                 canonicalUrl,
             };
@@ -400,8 +403,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             var resultType = GetString(root, "_type");
             if (resultType is not null && !string.Equals(resultType, "video", StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (root.TryGetProperty("entries", out _))
-                return false;
+            // The probe is a canonical single-video URL with --no-playlist and a fixed compact
+            // projection. Do not project the potentially unbounded entries collection; playlist
+            // envelopes are rejected by their non-video _type before any download starts.
             var extractor = GetString(root, "extractor");
             if (!string.Equals(extractor, "youtube", StringComparison.Ordinal))
                 return false;
