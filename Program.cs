@@ -34,6 +34,7 @@ namespace ChizuChan
             });
             builder.Logging.SetMinimumLevel(LogLevel.Information);
 
+            builder.Services.AddChizuChanWindowsService();
             builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 
             builder.Services.AddDiscordGateway(options =>
