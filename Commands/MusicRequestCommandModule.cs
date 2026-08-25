@@ -19,6 +19,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly IMusicSearchEmbedBuilder _embedBuilder;
     private readonly IMusicRequestNotificationStore _notificationStore;
     private readonly LidarrOptions _options;
+    private readonly SoulseekTrackSearchOptions _soulseekOptions;
     private readonly ILogger<MusicRequestCommandModule> _logger;
 
     public MusicRequestCommandModule(
@@ -30,6 +31,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         IMusicSearchEmbedBuilder embedBuilder,
         IMusicRequestNotificationStore notificationStore,
         IOptions<LidarrOptions> options,
+        IOptions<SoulseekTrackSearchOptions> soulseekOptions,
         ILogger<MusicRequestCommandModule> logger)
     {
         _lidarrService = lidarrService;
@@ -40,6 +42,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         _embedBuilder = embedBuilder;
         _notificationStore = notificationStore;
         _options = options.Value;
+        _soulseekOptions = soulseekOptions.Value;
         _logger = logger;
     }
 
@@ -79,7 +82,10 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
 
         MusicSearchCommandResult search;
         using var timeoutSource = new CancellationTokenSource(
-            TimeSpan.FromSeconds(Math.Clamp(_options.SearchTimeoutSeconds, 5, 60)));
+            TimeSpan.FromSeconds(Math.Clamp(
+                Math.Max(_options.SearchTimeoutSeconds, _soulseekOptions.GetMinimumCommandTimeoutSeconds()),
+                5,
+                60)));
         try
         {
             search = await MusicSearchCommandCoordinator.SearchAsync(
