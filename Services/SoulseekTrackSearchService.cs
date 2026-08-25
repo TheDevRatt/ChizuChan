@@ -113,16 +113,27 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
             using var client = _httpClientFactory.CreateClient(nameof(SoulseekTrackSearchService));
             while (true)
             {
-                using var request = new HttpRequestMessage(
-                    HttpMethod.Put,
-                    new Uri(endpoint, $"/api/v0/searches/{searchId:D}"));
-                request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
-                using var response = await client.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    timeout.Token);
-                if (response.StatusCode != HttpStatusCode.NotFound)
-                    return;
+                try
+                {
+                    using var request = new HttpRequestMessage(
+                        HttpMethod.Put,
+                        new Uri(endpoint, $"/api/v0/searches/{searchId:D}"));
+                    request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
+                    using var response = await client.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeout.Token);
+                    var statusCode = (int)response.StatusCode;
+                    if (response.StatusCode != HttpStatusCode.NotFound &&
+                        statusCode is not (>= 500 and <= 599))
+                    {
+                        return;
+                    }
+                }
+                catch (HttpRequestException) when (!timeout.IsCancellationRequested)
+                {
+                    // Retry transient transport failures within the same bounded cleanup budget.
+                }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
             }
