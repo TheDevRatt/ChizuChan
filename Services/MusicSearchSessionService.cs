@@ -153,7 +153,18 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         string query,
         IEnumerable<MusicSearchResultPage> pages,
         bool lidarrAvailable = true,
-        bool youtubeAvailable = true)
+        bool youtubeAvailable = true) =>
+        SaveResults(userId, dmChannelId, query, pages, lidarrAvailable, youtubeAvailable, false, true);
+
+    public MusicSearchSessionToken SaveResults(
+        ulong userId,
+        ulong dmChannelId,
+        string query,
+        IEnumerable<MusicSearchResultPage> pages,
+        bool lidarrAvailable,
+        bool youtubeAvailable,
+        bool soulseekAvailable,
+        bool lidarrRequested)
     {
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(pages);
@@ -177,6 +188,8 @@ public class MusicSearchSessionService : IMusicSearchSessionService
                 SourceMessageId = 0,
                 LidarrAvailable = lidarrAvailable,
                 YouTubeAvailable = youtubeAvailable,
+                SoulseekAvailable = soulseekAvailable,
+                LidarrRequested = lidarrRequested,
                 SavedAt = now,
                 Sequence = _nextSequence++,
                 Token = token,
@@ -459,7 +472,9 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         session.SourceMessageId,
         session.LidarrAvailable,
         session.YouTubeAvailable,
-        session.Token.Segment);
+        session.Token.Segment,
+        session.SoulseekAvailable,
+        session.LidarrRequested);
 
     private void RemoveExpiredSessions(DateTimeOffset now)
     {
@@ -487,6 +502,8 @@ public class MusicSearchSessionService : IMusicSearchSessionService
         public ulong SourceMessageId { get; set; }
         public bool LidarrAvailable { get; init; }
         public bool YouTubeAvailable { get; init; }
+        public bool SoulseekAvailable { get; init; }
+        public bool LidarrRequested { get; init; }
         public DateTimeOffset SavedAt { get; init; }
         public long Sequence { get; init; }
     }

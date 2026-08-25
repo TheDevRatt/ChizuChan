@@ -44,6 +44,7 @@ public sealed class MusicSearchControllerModule : ComponentInteractionModule<Com
                     message.Content = result.Message;
                     message.Embeds = [];
                     message.Components = [];
+                    message.AllowedMentions = AllowedMentionsProperties.None;
                 });
             });
     }

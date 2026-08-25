@@ -14,6 +14,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly ILidarrService _lidarrService;
     private readonly IMusicSearchSessionService _sessionService;
     private readonly IMusicRequestAccessService _accessService;
+    private readonly ISoulseekTrackSearchService _soulseekService;
     private readonly IYouTubeMusicSearchService _youtubeService;
     private readonly IMusicSearchEmbedBuilder _embedBuilder;
     private readonly IMusicRequestNotificationStore _notificationStore;
@@ -24,6 +25,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         ILidarrService lidarrService,
         IMusicSearchSessionService sessionService,
         IMusicRequestAccessService accessService,
+        ISoulseekTrackSearchService soulseekService,
         IYouTubeMusicSearchService youtubeService,
         IMusicSearchEmbedBuilder embedBuilder,
         IMusicRequestNotificationStore notificationStore,
@@ -33,6 +35,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         _lidarrService = lidarrService;
         _sessionService = sessionService;
         _accessService = accessService;
+        _soulseekService = soulseekService;
         _youtubeService = youtubeService;
         _embedBuilder = embedBuilder;
         _notificationStore = notificationStore;
@@ -42,11 +45,13 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
 
     [SlashCommand(
         "music_search",
-        "Search for requestable albums and matching YouTube tracks.",
+        "Search Soulseek and YouTube Music tracks, with optional album results.",
         Contexts = [InteractionContextType.BotDMChannel])]
     public async Task SearchAsync(
         [SlashCommandParameter(Description = "Song, album, or artist to search for")]
-        string query)
+        string query,
+        [SlashCommandParameter(Description = "Also search Lidarr for requestable albums")]
+        bool includeAlbums = false)
     {
         await RespondAsync(InteractionCallback.DeferredMessage());
 
@@ -82,9 +87,11 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
                 Context.Channel.Id,
                 trimmedQuery,
                 _sessionService,
+                _soulseekService,
                 _lidarrService,
                 _youtubeService,
                 _logger,
+                includeAlbums,
                 timeoutSource.Token);
         }
         catch (MusicSearchInProgressException)

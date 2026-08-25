@@ -12,6 +12,16 @@ public interface IMusicSearchSessionService
         bool lidarrAvailable = true,
         bool youtubeAvailable = true);
 
+    MusicSearchSessionToken SaveResults(
+        ulong userId,
+        ulong dmChannelId,
+        string query,
+        IEnumerable<MusicSearchResultPage> pages,
+        bool lidarrAvailable,
+        bool youtubeAvailable,
+        bool soulseekAvailable,
+        bool lidarrRequested);
+
     bool BindMessage(
         ulong userId,
         ulong dmChannelId,

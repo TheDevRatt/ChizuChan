@@ -14,8 +14,24 @@ public sealed class YouTubeTrackSuggestionDTO
     public string? ThumbnailUrl { get; set; }
 }
 
+public sealed class SoulseekTrackSuggestionDTO
+{
+    public Guid SearchId { get; set; }
+    public string Username { get; set; } = string.Empty;
+    public string Filename { get; set; } = string.Empty;
+    public long Size { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string? Artist { get; set; }
+    public TimeSpan Duration { get; set; }
+    public string Quality { get; set; } = string.Empty;
+    public bool HasFreeUploadSlot { get; set; }
+    public int UploadSpeed { get; set; }
+    public long QueueLength { get; set; }
+}
+
 public enum MusicSearchResultKind
 {
+    SoulseekTrack,
     Album,
     Single,
     EP,
@@ -146,6 +162,19 @@ public sealed record YouTubeTrackSearchResult
     public string? ThumbnailUrl { get; }
 }
 
+public sealed record SoulseekTrackSearchResult(
+    Guid SearchId,
+    string Username,
+    string Filename,
+    long Size,
+    string Title,
+    string? Artist,
+    TimeSpan Duration,
+    string Quality,
+    bool HasFreeUploadSlot,
+    int UploadSpeed,
+    long QueueLength);
+
 /// <summary>
 /// A server-created, typed and immutable page in a music search. Callers cannot supply an action URL or path.
 /// </summary>
@@ -158,16 +187,19 @@ public sealed record MusicSearchResultPage
     private MusicSearchResultPage(
         MusicSearchResultKind kind,
         LidarrAlbumSearchResult? lidarrAlbum,
-        YouTubeTrackSearchResult? youTubeTrack)
+        YouTubeTrackSearchResult? youTubeTrack,
+        SoulseekTrackSearchResult? soulseekTrack = null)
     {
         Kind = kind;
         LidarrAlbum = lidarrAlbum;
         YouTubeTrack = youTubeTrack;
+        SoulseekTrack = soulseekTrack;
     }
 
     public MusicSearchResultKind Kind { get; }
     public LidarrAlbumSearchResult? LidarrAlbum { get; }
     public YouTubeTrackSearchResult? YouTubeTrack { get; }
+    public SoulseekTrackSearchResult? SoulseekTrack { get; }
 
     public static MusicSearchResultPage FromLidarr(LidarrAlbumDTO album)
     {
@@ -202,6 +234,30 @@ public sealed record MusicSearchResultPage
 
         return new MusicSearchResultPage(MusicSearchResultKind.YouTubeTrack, null, canonicalTrack);
     }
+
+    public static MusicSearchResultPage FromSoulseek(SoulseekTrackSuggestionDTO track)
+    {
+        ArgumentNullException.ThrowIfNull(track);
+        if (track.SearchId == Guid.Empty || string.IsNullOrWhiteSpace(track.Username) ||
+            string.IsNullOrWhiteSpace(track.Filename) || track.Size <= 0)
+        {
+            throw new ArgumentException("A complete Soulseek track identity is required.", nameof(track));
+        }
+
+        var snapshot = new SoulseekTrackSearchResult(
+            track.SearchId,
+            track.Username,
+            track.Filename,
+            track.Size,
+            track.Title,
+            track.Artist,
+            track.Duration,
+            track.Quality,
+            track.HasFreeUploadSlot,
+            track.UploadSpeed,
+            track.QueueLength);
+        return new MusicSearchResultPage(MusicSearchResultKind.SoulseekTrack, null, null, snapshot);
+    }
 }
 
 public sealed record MusicSearchSessionSnapshot
@@ -215,7 +271,9 @@ public sealed record MusicSearchSessionSnapshot
         ulong sourceMessageId,
         bool lidarrAvailable,
         bool youtubeAvailable,
-        string actionTokenSegment = "")
+        string actionTokenSegment = "",
+        bool soulseekAvailable = false,
+        bool lidarrRequested = true)
     {
         ArgumentNullException.ThrowIfNull(query);
         ArgumentNullException.ThrowIfNull(pages);
@@ -228,6 +286,8 @@ public sealed record MusicSearchSessionSnapshot
         SourceMessageId = sourceMessageId;
         LidarrAvailable = lidarrAvailable;
         YouTubeAvailable = youtubeAvailable;
+        SoulseekAvailable = soulseekAvailable;
+        LidarrRequested = lidarrRequested;
         ActionTokenSegment = actionTokenSegment;
     }
 
@@ -239,6 +299,8 @@ public sealed record MusicSearchSessionSnapshot
     public ulong SourceMessageId { get; }
     public bool LidarrAvailable { get; init; }
     public bool YouTubeAvailable { get; init; }
+    public bool SoulseekAvailable { get; init; }
+    public bool LidarrRequested { get; init; }
     public string ActionTokenSegment { get; }
 
     public MusicSearchResultPage? CurrentPage =>
