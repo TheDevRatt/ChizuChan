@@ -110,15 +110,22 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         try
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-            using var request = new HttpRequestMessage(
-                HttpMethod.Put,
-                new Uri(endpoint, $"/api/v0/searches/{searchId:D}"));
-            request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
             using var client = _httpClientFactory.CreateClient(nameof(SoulseekTrackSearchService));
-            using var response = await client.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                timeout.Token);
+            while (true)
+            {
+                using var request = new HttpRequestMessage(
+                    HttpMethod.Put,
+                    new Uri(endpoint, $"/api/v0/searches/{searchId:D}"));
+                request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
+                using var response = await client.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    timeout.Token);
+                if (response.StatusCode != HttpStatusCode.NotFound)
+                    return;
+
+                await Task.Delay(TimeSpan.FromMilliseconds(100), timeout.Token);
+            }
         }
         catch (Exception)
         {
