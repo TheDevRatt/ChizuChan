@@ -8,7 +8,12 @@ public interface ISoulseekTrackSearchService
         string query,
         CancellationToken cancellationToken);
 
-    Task<StandardResponse<bool>> QueueDownloadAsync(
+    Task<StandardResponse<SoulseekDownloadReceiptDTO>> QueueDownloadAsync(
         SoulseekTrackSearchResult track,
+        CancellationToken cancellationToken);
+
+    Task<StandardResponse<SoulseekDownloadReceiptDTO>> QueueDownloadAsync(
+        SoulseekTrackSearchResult track,
+        Guid batchId,
         CancellationToken cancellationToken);
 }

@@ -47,6 +47,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
     private readonly ISoulseekTrackSearchService? _soulseekService;
     private readonly IYouTubeMusicActionHandler _youTubeHandler;
     private readonly IMusicRequestNotificationStore? _notificationStore;
+    private readonly IDirectMusicRequestStatusStore? _directStatusStore = null;
     private readonly ILogger<MusicSearchActionCoordinator> _logger;
 
     [ActivatorUtilitiesConstructor]
@@ -57,6 +58,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         ISoulseekTrackSearchService soulseekService,
         IYouTubeMusicActionHandler youTubeHandler,
         IMusicRequestNotificationStore notificationStore,
+        IDirectMusicRequestStatusStore directStatusStore,
         ILogger<MusicSearchActionCoordinator> logger)
     {
         _sessionService = sessionService;
@@ -65,6 +67,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         _soulseekService = soulseekService;
         _youTubeHandler = youTubeHandler;
         _notificationStore = notificationStore;
+        _directStatusStore = directStatusStore;
         _logger = logger;
     }
 
@@ -218,16 +221,49 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
                 return MusicSearchActionResult.Failed("Soulseek downloads are unavailable right now.");
             var track = page.SoulseekTrack
                 ?? throw new InvalidOperationException("A Soulseek page requires track data.");
+            var artist = string.IsNullOrWhiteSpace(track.Artist) ? "Unknown artist" : track.Artist;
+            var directQueuedMessage =
+                $"Queued **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}** from Soulseek. " +
+                "The organizer imports it into Plex after the transfer completes.";
+            DirectMusicRequestStatusDTO? persistedIntent = null;
             try
             {
-                var soulseekResponse = await _soulseekService.QueueDownloadAsync(track, cancellationToken);
-                if (!soulseekResponse.Success || soulseekResponse.Data is not true)
-                    return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+                StandardResponse<SoulseekDownloadReceiptDTO> soulseekResponse;
+                if (_directStatusStore is null)
+                {
+                    soulseekResponse = await _soulseekService.QueueDownloadAsync(track, cancellationToken);
+                }
+                else
+                {
+                    var batchId = Guid.NewGuid();
+                    persistedIntent = await _directStatusStore.AddAsync(new DirectMusicRequestStatusDTO
+                    {
+                        BatchId = batchId,
+                        DiscordUserId = selection.OwnerUserId,
+                        DmChannelId = selection.DmChannelId,
+                        Username = track.Username,
+                        RemoteFilename = track.Filename,
+                        ArtistName = artist,
+                        TrackTitle = track.Title,
+                        ExpectedSize = track.Size,
+                        ExpectedDuration = track.Duration,
+                        State = DirectMusicRequestState.DispatchPending,
+                    }, cancellationToken);
+                    soulseekResponse = await _soulseekService.QueueDownloadAsync(
+                        track, batchId, cancellationToken);
+                }
 
-                var artist = string.IsNullOrWhiteSpace(track.Artist) ? "Unknown artist" : track.Artist;
+                if (!soulseekResponse.Success || soulseekResponse.Data is null)
+                {
+                    await MarkDirectQueueFailureSafelyAsync(persistedIntent, cancellationToken);
+                    return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+                }
+
+                if (_directStatusStore is null)
+                    return MusicSearchActionResult.Succeeded(directQueuedMessage);
+
                 return MusicSearchActionResult.Succeeded(
-                    $"Queued **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}** from Soulseek. " +
-                    "The organizer imports it into Plex after the transfer completes.");
+                    directQueuedMessage + " Check `/music_status` for progress.");
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -235,6 +271,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
             }
             catch (Exception exception)
             {
+                await MarkDirectQueueFailureSafelyAsync(persistedIntent, cancellationToken);
                 _logger.LogWarning(
                     "Soulseek music action provider failed ({ExceptionType}).",
                     exception.GetType().Name);
@@ -347,6 +384,32 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
 
         return MusicSearchActionResult.Succeeded(
             $"{queuedMessage} Chizu will DM you here when it's ready in Plex/Plexamp.");
+    }
+
+    private async Task MarkDirectQueueFailureSafelyAsync(
+        DirectMusicRequestStatusDTO? intent,
+        CancellationToken cancellationToken)
+    {
+        if (intent is null || _directStatusStore is null)
+            return;
+        try
+        {
+            await _directStatusStore.UpdateAsync(intent with
+            {
+                State = DirectMusicRequestState.Failed,
+                FailureCategory = "QueueRejected",
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "Direct queue failure could not be persisted ({ExceptionType}).",
+                exception.GetType().Name);
+        }
     }
 
     private static string Limit(string value, int maximumLength) =>

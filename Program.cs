@@ -55,6 +55,8 @@ namespace ChizuChan
             .Configure<LidarrOptions>(builder.Configuration.GetSection(LidarrOptions.SectionName))
             .Configure<MusicRequestNotificationOptions>(
                 builder.Configuration.GetSection(MusicRequestNotificationOptions.SectionName))
+            .Configure<DirectMusicRequestStatusOptions>(
+                builder.Configuration.GetSection(DirectMusicRequestStatusOptions.SectionName))
             .Configure<SoulseekTrackSearchOptions>(builder.Configuration.GetSection(SoulseekTrackSearchOptions.SectionName))
             .Configure<YouTubeMusicSearchOptions>(builder.Configuration.GetSection(YouTubeMusicSearchOptions.SectionName))
             .Configure<YouTubeMusicDownloadOptions>(builder.Configuration.GetSection(YouTubeMusicDownloadOptions.SectionName))
@@ -63,6 +65,18 @@ namespace ChizuChan
 
             builder.Services
                 .AddHttpClient(nameof(SoulseekTrackSearchService))
+                .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+                {
+                    AllowAutoRedirect = false,
+                });
+            builder.Services
+                .AddHttpClient(nameof(SoulseekDownloadStatusReader))
+                .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+                {
+                    AllowAutoRedirect = false,
+                });
+            builder.Services
+                .AddHttpClient(nameof(PlexMusicReadinessReader))
                 .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
                 {
                     AllowAutoRedirect = false,
@@ -85,6 +99,7 @@ namespace ChizuChan
                 (ILidarrCompletionReader)sp.GetRequiredService<ILidarrService>());
             builder.Services.AddHostedService<StatusRotatorService>();
             builder.Services.AddHostedService<MusicRequestCompletionWorker>();
+            builder.Services.AddHostedService<DirectMusicRequestStatusWorker>();
 
             var host = builder.Build()
                 .AddModules(typeof(Program).Assembly);
