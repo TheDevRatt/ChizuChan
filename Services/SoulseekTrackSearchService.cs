@@ -50,7 +50,7 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         {
             id = searchId,
             searchText = trimmedQuery,
-            searchTimeout = Math.Clamp(_options.SearchTimeoutSeconds, 5, 30),
+            searchTimeout = Math.Clamp(_options.SearchTimeoutSeconds, 5, 30) * 1000,
             responseLimit = Math.Clamp(_options.ResponseLimit, 1, 100),
             fileLimit = Math.Clamp(_options.FileLimit, 1, 500),
             filterResponses = true,
