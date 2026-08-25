@@ -45,16 +45,23 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
         session = session with { Query = query.Trim() };
 
         var page = session.CurrentPage;
-        if (page is null || (!session.LidarrAvailable && !session.YouTubeAvailable))
+        if (page is null ||
+            (!session.LidarrAvailable && !session.YouTubeAvailable && !session.SoulseekAvailable))
             return BuildEmpty(session);
 
-        var embed = page.Kind == MusicSearchResultKind.YouTubeTrack
-            ? BuildYouTubeEmbed(session, page)
-            : BuildLidarrEmbed(session, page);
+        var embed = page.Kind switch
+        {
+            MusicSearchResultKind.SoulseekTrack => BuildSoulseekEmbed(session, page),
+            MusicSearchResultKind.YouTubeTrack => BuildYouTubeEmbed(session, page),
+            _ => BuildLidarrEmbed(session, page),
+        };
 
-        var actionAvailable = page.Kind == MusicSearchResultKind.YouTubeTrack
-            ? session.YouTubeAvailable
-            : session.LidarrAvailable;
+        var actionAvailable = page.Kind switch
+        {
+            MusicSearchResultKind.SoulseekTrack => session.SoulseekAvailable,
+            MusicSearchResultKind.YouTubeTrack => session.YouTubeAvailable,
+            _ => session.LidarrAvailable,
+        };
         return (embed, BuildComponents(
             page.Kind,
             session.TotalPages,
@@ -449,16 +456,47 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
         };
     }
 
+    private static EmbedProperties BuildSoulseekEmbed(
+        MusicSearchSessionSnapshot session,
+        MusicSearchResultPage page)
+    {
+        var track = page.SoulseekTrack ?? throw new InvalidOperationException("A Soulseek page requires track data.");
+        var artist = SanitizeMarkdownOrFallback(track.Artist, "Unknown artist", 160);
+        var title = SanitizeMarkdownOrFallback(track.Title, "Unknown track", 220);
+        var quality = SanitizeMarkdownOrFallback(track.Quality, "Audio", 120);
+        var availability = track.HasFreeUploadSlot ? "Free slot" : $"Queue: {Math.Max(0, track.QueueLength)}";
+        var description = new StringBuilder()
+            .Append("**Artist:** ").AppendLine(artist)
+            .Append("**Track:** ").AppendLine(title)
+            .Append("**Quality:** ").AppendLine(quality)
+            .Append("**Duration:** ").AppendLine(FormatDuration(track.Duration))
+            .Append("**Availability:** ").Append(availability);
+
+        return new EmbedProperties
+        {
+            Title = Truncate($"Soulseek track: {title}", EmbedTitleLimit),
+            Description = Truncate(description.ToString(), EmbedDescriptionLimit),
+            Color = new Color(0x4C9F70),
+            Fields = [],
+            Footer = BuildFooter(session),
+        };
+    }
+
     private static (EmbedProperties Embed, IMessageComponentProperties[] Components) BuildEmpty(
         MusicSearchSessionSnapshot session)
     {
-        var lidarrStatus = session.LidarrAvailable
-            ? "No matching Lidarr releases found."
-            : "Lidarr search is temporarily unavailable.";
+        var soulseekStatus = session.SoulseekAvailable
+            ? "No matching Soulseek tracks found."
+            : "Soulseek search is temporarily unavailable.";
         var youtubeStatus = session.YouTubeAvailable
-            ? "No matching YouTube tracks found."
-            : "YouTube search is temporarily unavailable.";
-        var description = $"**Lidarr:** {lidarrStatus}\n**YouTube:** {youtubeStatus}";
+            ? "No matching YouTube tracks found. No matching YouTube Music songs found."
+            : "YouTube search is temporarily unavailable. YouTube Music search is temporarily unavailable.";
+        var lidarrStatus = !session.LidarrRequested
+            ? "Album results were not requested."
+            : session.LidarrAvailable
+                ? "No matching Lidarr releases found."
+                : "Lidarr search is temporarily unavailable.";
+        var description = $"**Soulseek:** {soulseekStatus}\n**YouTube Music:** {youtubeStatus}\n**Albums:** {lidarrStatus}";
 
         var embed = new EmbedProperties
         {
@@ -481,6 +519,7 @@ public sealed class MusicSearchEmbedBuilder : IMusicSearchEmbedBuilder
         var disableNavigation = totalPages <= 1;
         var actionLabel = kind switch
         {
+            MusicSearchResultKind.SoulseekTrack => "Download Track",
             MusicSearchResultKind.Album => "Request Album",
             MusicSearchResultKind.Single => "Request Single",
             MusicSearchResultKind.EP or MusicSearchResultKind.Release => "Request EP/Release",

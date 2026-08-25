@@ -1,6 +1,8 @@
+using System.Text;
 using ChizuChan.DTOs;
 using ChizuChan.Services;
 using ChizuChan.Services.Interfaces;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace ChizuChan.Commands;
@@ -42,10 +44,31 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
     private readonly IMusicSearchSessionService _sessionService;
     private readonly IMusicRequestAccessService _accessService;
     private readonly ILidarrService _lidarrService;
+    private readonly ISoulseekTrackSearchService? _soulseekService;
     private readonly IYouTubeMusicActionHandler _youTubeHandler;
     private readonly IMusicRequestNotificationStore? _notificationStore;
     private readonly ILogger<MusicSearchActionCoordinator> _logger;
 
+    [ActivatorUtilitiesConstructor]
+    public MusicSearchActionCoordinator(
+        IMusicSearchSessionService sessionService,
+        IMusicRequestAccessService accessService,
+        ILidarrService lidarrService,
+        ISoulseekTrackSearchService soulseekService,
+        IYouTubeMusicActionHandler youTubeHandler,
+        IMusicRequestNotificationStore notificationStore,
+        ILogger<MusicSearchActionCoordinator> logger)
+    {
+        _sessionService = sessionService;
+        _accessService = accessService;
+        _lidarrService = lidarrService;
+        _soulseekService = soulseekService;
+        _youTubeHandler = youTubeHandler;
+        _notificationStore = notificationStore;
+        _logger = logger;
+    }
+
+    // Compatibility constructors for narrow unit-test and non-DI callers.
     public MusicSearchActionCoordinator(
         IMusicSearchSessionService sessionService,
         IMusicRequestAccessService accessService,
@@ -57,13 +80,29 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         _sessionService = sessionService;
         _accessService = accessService;
         _lidarrService = lidarrService;
+        _soulseekService = null;
         _youTubeHandler = youTubeHandler;
         _notificationStore = notificationStore;
         _logger = logger;
     }
 
-    // Compatibility constructor for narrow unit-test and non-DI callers. The application host
-    // resolves the longer constructor and always supplies the durable store.
+    public MusicSearchActionCoordinator(
+        IMusicSearchSessionService sessionService,
+        IMusicRequestAccessService accessService,
+        ILidarrService lidarrService,
+        ISoulseekTrackSearchService soulseekService,
+        IYouTubeMusicActionHandler youTubeHandler,
+        ILogger<MusicSearchActionCoordinator> logger)
+    {
+        _sessionService = sessionService;
+        _accessService = accessService;
+        _lidarrService = lidarrService;
+        _soulseekService = soulseekService;
+        _youTubeHandler = youTubeHandler;
+        _notificationStore = null;
+        _logger = logger;
+    }
+
     public MusicSearchActionCoordinator(
         IMusicSearchSessionService sessionService,
         IMusicRequestAccessService accessService,
@@ -74,6 +113,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         _sessionService = sessionService;
         _accessService = accessService;
         _lidarrService = lidarrService;
+        _soulseekService = null;
         _youTubeHandler = youTubeHandler;
         _notificationStore = null;
         _logger = logger;
@@ -163,6 +203,45 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         CancellationToken cancellationToken)
     {
         var page = selection.Page;
+        if (page.Kind == MusicSearchResultKind.SoulseekTrack)
+        {
+            var downloadAccess = _accessService.CheckAccess(selection.OwnerUserId, MusicRequestOperation.Download);
+            if (downloadAccess.Status == MusicRequestAccessStatus.Unauthorized)
+                return MusicSearchActionResult.Failed("You don't have permission to use music requests.");
+            if (downloadAccess.Status == MusicRequestAccessStatus.RateLimited)
+            {
+                var seconds = Math.Max(1, (int)Math.Ceiling(downloadAccess.RetryAfter.TotalSeconds));
+                return MusicSearchActionResult.Failed($"Please wait {seconds}s before requesting again.");
+            }
+
+            if (_soulseekService is null)
+                return MusicSearchActionResult.Failed("Soulseek downloads are unavailable right now.");
+            var track = page.SoulseekTrack
+                ?? throw new InvalidOperationException("A Soulseek page requires track data.");
+            try
+            {
+                var soulseekResponse = await _soulseekService.QueueDownloadAsync(track, cancellationToken);
+                if (!soulseekResponse.Success || soulseekResponse.Data is not true)
+                    return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+
+                var artist = string.IsNullOrWhiteSpace(track.Artist) ? "Unknown artist" : track.Artist;
+                return MusicSearchActionResult.Succeeded(
+                    $"Queued **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}** from Soulseek. " +
+                    "The organizer imports it into Plex after the transfer completes.");
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    "Soulseek music action provider failed ({ExceptionType}).",
+                    exception.GetType().Name);
+                return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+            }
+        }
+
         if (page.Kind == MusicSearchResultKind.YouTubeTrack)
         {
             var downloadAccess = _accessService.CheckAccess(selection.OwnerUserId, MusicRequestOperation.Download);
@@ -226,7 +305,8 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         if (!response.Success || response.Data is null)
             return MusicSearchActionResult.Failed("Couldn't request that release right now.");
 
-        var label = $"**{Limit(response.Data.ArtistName, 70)} — {Limit(response.Data.Title, 70)}**";
+        var label =
+            $"**{EscapeDiscordText(response.Data.ArtistName, 70)} — {EscapeDiscordText(response.Data.Title, 70)}**";
         var queuedMessage = response.Data.AlreadyExists
             ? $"{label} is already present in Lidarr."
             : $"Queued {label} in Lidarr.";
@@ -271,4 +351,26 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
 
     private static string Limit(string value, int maximumLength) =>
         value.Length <= maximumLength ? value : value[..(maximumLength - 1)] + "…";
+
+    private static string EscapeDiscordText(string value, int maximumLength)
+    {
+        var builder = new StringBuilder(maximumLength * 2);
+        foreach (var character in Limit(value.Trim(), maximumLength))
+        {
+            if (char.IsControl(character))
+            {
+                builder.Append(' ');
+                continue;
+            }
+            if (character == '@')
+            {
+                builder.Append("@\u200B");
+                continue;
+            }
+            if (character is '\\' or '`' or '*' or '_' or '~' or '|' or '[' or ']' or '(' or ')' or '<' or '>')
+                builder.Append('\\');
+            builder.Append(character);
+        }
+        return builder.ToString();
+    }
 }

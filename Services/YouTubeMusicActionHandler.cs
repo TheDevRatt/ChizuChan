@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using ChizuChan.Options;
@@ -251,7 +252,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 return SafeFailure();
             await WriteIndexAtomicallyAsync(root, indexRoot, indexPath, videoId, destination, cancellationToken);
             return YouTubeMusicActionResult.Succeeded(
-                $"Downloaded **{Limit(metadata.Artist, 70)} — {Limit(metadata.Title, 70)}**. " +
+                $"Downloaded **{EscapeDiscordText(metadata.Artist, 70)} — {EscapeDiscordText(metadata.Title, 70)}**. " +
                 "Plex/Plexamp will pick it up on the next library scan.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -935,7 +936,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
 
     private static YouTubeMusicActionResult AlreadyDownloaded(string artist, string title) =>
         YouTubeMusicActionResult.Succeeded(
-            $"**{Limit(artist, 70)} — {Limit(title, 70)}** is already downloaded. " +
+            $"**{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(title, 70)}** is already downloaded. " +
             "Plex/Plexamp can find it after the next library scan.");
 
     private void LogSafe(Exception exception, string category) =>
@@ -946,6 +947,28 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
 
     private static string Limit(string value, int maximumLength) =>
         value.Length <= maximumLength ? value : value[..(maximumLength - 1)] + "…";
+
+    private static string EscapeDiscordText(string value, int maximumLength)
+    {
+        var builder = new StringBuilder(maximumLength * 2);
+        foreach (var character in Limit(value.Trim(), maximumLength))
+        {
+            if (char.IsControl(character))
+            {
+                builder.Append(' ');
+                continue;
+            }
+            if (character == '@')
+            {
+                builder.Append("@\u200B");
+                continue;
+            }
+            if (character is '\\' or '`' or '*' or '_' or '~' or '|' or '[' or ']' or '(' or ')' or '<' or '>')
+                builder.Append('\\');
+            builder.Append(character);
+        }
+        return builder.ToString();
+    }
 
     private VideoLockState AcquireVideoLock(string videoId)
     {

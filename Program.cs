@@ -55,10 +55,18 @@ namespace ChizuChan
             .Configure<LidarrOptions>(builder.Configuration.GetSection(LidarrOptions.SectionName))
             .Configure<MusicRequestNotificationOptions>(
                 builder.Configuration.GetSection(MusicRequestNotificationOptions.SectionName))
+            .Configure<SoulseekTrackSearchOptions>(builder.Configuration.GetSection(SoulseekTrackSearchOptions.SectionName))
             .Configure<YouTubeMusicSearchOptions>(builder.Configuration.GetSection(YouTubeMusicSearchOptions.SectionName))
             .Configure<YouTubeMusicDownloadOptions>(builder.Configuration.GetSection(YouTubeMusicDownloadOptions.SectionName))
             .AddAllServicesFromAssembly(typeof(Program).Assembly)
             .AddHttpClient();
+
+            builder.Services
+                .AddHttpClient(nameof(SoulseekTrackSearchService))
+                .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+                {
+                    AllowAutoRedirect = false,
+                });
 
             // Explicit registrations (keep these even if you scan)
             builder.Services.AddSingleton<IStatusProvider, WeatherStatusProvider>();
