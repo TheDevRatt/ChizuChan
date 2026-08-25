@@ -367,6 +367,7 @@ public sealed class DirectMusicRequestStatusStore : IDirectMusicRequestStatusSto
     {
         if ((current.TransferId.HasValue && current.TransferId != changed.TransferId) ||
             current.BatchId != changed.BatchId ||
+            current.SearchId != changed.SearchId ||
             current.DiscordUserId != changed.DiscordUserId ||
             current.DmChannelId != changed.DmChannelId ||
             current.Username != changed.Username ||
@@ -422,8 +423,8 @@ public sealed class DirectMusicRequestStatusStore : IDirectMusicRequestStatusSto
 
     private static void ValidateStoredRecord(DirectMusicRequestStatusDTO record)
     {
-        if (record.RequestId == Guid.Empty || record.BatchId == Guid.Empty)
-            throw new InvalidDataException("Direct music request and batch IDs are required.");
+        if (record.RequestId == Guid.Empty || record.BatchId == Guid.Empty || record.SearchId == Guid.Empty)
+            throw new InvalidDataException("Direct music request, batch, and search IDs are required.");
         if (record.DiscordUserId == 0 || record.DmChannelId == 0)
             throw new InvalidDataException("Discord user and channel IDs are required.");
         ValidateText(record.Username, nameof(record.Username), 200);

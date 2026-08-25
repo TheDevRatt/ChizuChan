@@ -13,6 +13,10 @@ public sealed record SoulseekDownloadBatchStatusDTO(
     Guid? TransferId,
     long BytesTransferred,
     long Size,
-    string? FailureCategory);
+    string? FailureCategory)
+{
+    public string Username { get; init; } = string.Empty;
+    public string Filename { get; init; } = string.Empty;
+}
 
 public sealed record PlexTrackReadinessDTO(bool IsReady, string? MediaIdentity);

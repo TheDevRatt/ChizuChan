@@ -231,10 +231,10 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
             if (response.StatusCode == HttpStatusCode.Created)
             {
                 using var document = await ReadBoundedJsonAsync(response.Content, timeout.Token);
-                if (HasExpectedBatchReceipt(document.RootElement, batchId, track))
+                if (TryCreateBatchReceipt(document.RootElement, batchId, track, out var receipt))
                 {
                     return StandardResponse<SoulseekDownloadReceiptDTO>.SuccessResponse(
-                        new SoulseekDownloadReceiptDTO(batchId),
+                        receipt,
                         (int)response.StatusCode);
                 }
             }
@@ -242,10 +242,10 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
             if (response.StatusCode is HttpStatusCode.OK or HttpStatusCode.MultiStatus)
             {
                 using var document = await ReadBoundedJsonAsync(response.Content, timeout.Token);
-                if (HasExpectedBatchReceipt(document.RootElement, batchId, track))
+                if (TryCreateBatchReceipt(document.RootElement, batchId, track, out var receipt))
                 {
                     return StandardResponse<SoulseekDownloadReceiptDTO>.SuccessResponse(
-                        new SoulseekDownloadReceiptDTO(batchId),
+                        receipt,
                         (int)response.StatusCode);
                 }
             }
@@ -262,11 +262,13 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         }
     }
 
-    private static bool HasExpectedBatchReceipt(
+    private static bool TryCreateBatchReceipt(
         JsonElement root,
         Guid batchId,
-        SoulseekTrackSearchResult track)
+        SoulseekTrackSearchResult track,
+        out SoulseekDownloadReceiptDTO receipt)
     {
+        receipt = null!;
         if (!root.TryGetProperty("batch", out var batch) ||
             batch.ValueKind != JsonValueKind.Object ||
             !batch.TryGetProperty("id", out var id) ||
@@ -285,17 +287,32 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         }
 
         var transfer = transfers[0];
-        return transfer.ValueKind == JsonValueKind.Object &&
-            transfer.TryGetProperty("batchId", out var transferBatchId) &&
-            transferBatchId.TryGetGuid(out var returnedTransferBatchId) &&
-            returnedTransferBatchId == batchId &&
-            transfer.TryGetProperty("username", out var transferUsername) &&
-            transferUsername.GetString() == track.Username &&
-            transfer.TryGetProperty("filename", out var filename) &&
-            filename.GetString() == track.Filename &&
-            transfer.TryGetProperty("size", out var size) &&
-            size.TryGetInt64(out var returnedSize) &&
-            returnedSize == track.Size;
+        if (transfer.ValueKind != JsonValueKind.Object ||
+            !transfer.TryGetProperty("id", out var transferIdElement) ||
+            !transferIdElement.TryGetGuid(out var transferId) ||
+            transferId == Guid.Empty ||
+            !transfer.TryGetProperty("batchId", out var transferBatchId) ||
+            !transferBatchId.TryGetGuid(out var returnedTransferBatchId) ||
+            returnedTransferBatchId != batchId ||
+            !transfer.TryGetProperty("username", out var transferUsername) ||
+            transferUsername.GetString() != track.Username ||
+            !transfer.TryGetProperty("filename", out var filename) ||
+            filename.GetString() != track.Filename ||
+            !transfer.TryGetProperty("size", out var size) ||
+            !size.TryGetInt64(out var returnedSize) ||
+            returnedSize != track.Size)
+        {
+            return false;
+        }
+
+        receipt = new SoulseekDownloadReceiptDTO(batchId)
+        {
+            TransferId = transferId,
+            Username = track.Username,
+            Filename = track.Filename,
+            Size = track.Size,
+        };
+        return true;
     }
 
     private bool TryGetEndpoint(out Uri endpoint)

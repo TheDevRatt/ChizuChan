@@ -239,6 +239,7 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
                     persistedIntent = await _directStatusStore.AddAsync(new DirectMusicRequestStatusDTO
                     {
                         BatchId = batchId,
+                        SearchId = track.SearchId,
                         DiscordUserId = selection.OwnerUserId,
                         DmChannelId = selection.DmChannelId,
                         Username = track.Username,
@@ -255,13 +256,32 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
 
                 if (!soulseekResponse.Success || soulseekResponse.Data is null)
                 {
-                    await MarkDirectQueueFailureSafelyAsync(persistedIntent, cancellationToken);
-                    return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+                    if (IsDefinitiveQueueRejection(soulseekResponse.StatusCode))
+                    {
+                        await MarkDirectQueueFailureSafelyAsync(persistedIntent, cancellationToken);
+                        return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
+                    }
+
+                    return MusicSearchActionResult.Succeeded(
+                        $"Saved **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}**. " +
+                        "Soulseek queue confirmation is pending; check `/music_status` for progress.");
                 }
 
                 if (_directStatusStore is null)
                     return MusicSearchActionResult.Succeeded(directQueuedMessage);
 
+                if (!ReceiptMatches(soulseekResponse.Data, persistedIntent!))
+                {
+                    return MusicSearchActionResult.Succeeded(
+                        $"Saved **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}**. " +
+                        "Soulseek queue confirmation is pending; check `/music_status` for progress.");
+                }
+
+                await _directStatusStore.UpdateAsync(persistedIntent! with
+                {
+                    State = DirectMusicRequestState.Queued,
+                    TransferId = soulseekResponse.Data.TransferId,
+                }, cancellationToken);
                 return MusicSearchActionResult.Succeeded(
                     directQueuedMessage + " Check `/music_status` for progress.");
             }
@@ -271,10 +291,15 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
             }
             catch (Exception exception)
             {
-                await MarkDirectQueueFailureSafelyAsync(persistedIntent, cancellationToken);
                 _logger.LogWarning(
                     "Soulseek music action provider failed ({ExceptionType}).",
                     exception.GetType().Name);
+                if (persistedIntent is not null)
+                {
+                    return MusicSearchActionResult.Succeeded(
+                        $"Saved **{EscapeDiscordText(artist, 70)} — {EscapeDiscordText(track.Title, 70)}**. " +
+                        "Soulseek queue confirmation is pending; check `/music_status` for progress.");
+                }
                 return MusicSearchActionResult.Failed("Couldn't queue that Soulseek track right now.");
             }
         }
@@ -385,6 +410,18 @@ public sealed class MusicSearchActionCoordinator : IMusicSearchActionCoordinator
         return MusicSearchActionResult.Succeeded(
             $"{queuedMessage} Chizu will DM you here when it's ready in Plex/Plexamp.");
     }
+
+    private static bool ReceiptMatches(
+        SoulseekDownloadReceiptDTO receipt,
+        DirectMusicRequestStatusDTO intent) =>
+        receipt.BatchId == intent.BatchId &&
+        receipt.TransferId != Guid.Empty &&
+        receipt.Username == intent.Username &&
+        receipt.Filename == intent.RemoteFilename &&
+        receipt.Size == intent.ExpectedSize;
+
+    private static bool IsDefinitiveQueueRejection(int statusCode) =>
+        statusCode is 400 or 403 or 404;
 
     private async Task MarkDirectQueueFailureSafelyAsync(
         DirectMusicRequestStatusDTO? intent,

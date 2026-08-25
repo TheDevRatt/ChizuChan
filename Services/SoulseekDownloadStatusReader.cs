@@ -61,6 +61,8 @@ public sealed class SoulseekDownloadStatusReader : ISoulseekDownloadStatusReader
             var transfer = transfers[0];
             if (!TryReadGuid(transfer, "batchId", out var transferBatchId) || transferBatchId != batchId ||
                 !TryReadGuid(transfer, "id", out var transferId) ||
+                !TryReadText(transfer, "username", 200, out var username) ||
+                !TryReadText(transfer, "filename", 500, out var filename) ||
                 !TryReadInt64(transfer, "size", out var size) || size <= 0 ||
                 !TryReadInt64(transfer, "bytesTransferred", out var bytes) || bytes < 0 || bytes > size)
             {
@@ -72,7 +74,11 @@ public sealed class SoulseekDownloadStatusReader : ISoulseekDownloadStatusReader
                 : string.Empty;
             var mapped = MapState(stateText, bytes);
             return StandardResponse<SoulseekDownloadBatchStatusDTO>.SuccessResponse(
-                new(mapped.State, transferId, bytes, size, mapped.FailureCategory), 200);
+                new(mapped.State, transferId, bytes, size, mapped.FailureCategory)
+                {
+                    Username = username,
+                    Filename = filename,
+                }, 200);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -153,6 +159,18 @@ public sealed class SoulseekDownloadStatusReader : ISoulseekDownloadStatusReader
     {
         value = default;
         return root.TryGetProperty(name, out var element) && element.TryGetInt64(out value);
+    }
+
+    private static bool TryReadText(JsonElement root, string name, int maximumLength, out string value)
+    {
+        value = string.Empty;
+        if (!root.TryGetProperty(name, out var element) || element.ValueKind != JsonValueKind.String)
+            return false;
+        var text = element.GetString();
+        if (string.IsNullOrWhiteSpace(text) || text.Length > maximumLength || text.Any(char.IsControl))
+            return false;
+        value = text;
+        return true;
     }
 
     private static StandardResponse<SoulseekDownloadBatchStatusDTO> Unavailable(int status = 503) =>

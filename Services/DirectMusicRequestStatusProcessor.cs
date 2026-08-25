@@ -11,6 +11,7 @@ public sealed class DirectMusicRequestStatusProcessor : IDirectMusicRequestStatu
     private const int MaximumRequestsPerPoll = 100;
     private readonly IDirectMusicRequestStatusStore _store;
     private readonly ISoulseekDownloadStatusReader _soulseekReader;
+    private readonly ISoulseekTrackSearchService _soulseekDispatcher;
     private readonly IPlexMusicReadinessReader _plexReader;
     private readonly DirectMusicRequestStatusOptions _options;
     private readonly TimeProvider _timeProvider;
@@ -19,6 +20,7 @@ public sealed class DirectMusicRequestStatusProcessor : IDirectMusicRequestStatu
     public DirectMusicRequestStatusProcessor(
         IDirectMusicRequestStatusStore store,
         ISoulseekDownloadStatusReader soulseekReader,
+        ISoulseekTrackSearchService soulseekDispatcher,
         IPlexMusicReadinessReader plexReader,
         IOptions<DirectMusicRequestStatusOptions> options,
         TimeProvider timeProvider,
@@ -26,6 +28,7 @@ public sealed class DirectMusicRequestStatusProcessor : IDirectMusicRequestStatu
     {
         _store = store;
         _soulseekReader = soulseekReader;
+        _soulseekDispatcher = soulseekDispatcher;
         _plexReader = plexReader;
         _options = options.Value;
         _timeProvider = timeProvider;
@@ -81,20 +84,22 @@ public sealed class DirectMusicRequestStatusProcessor : IDirectMusicRequestStatu
             if (request.State == DirectMusicRequestState.DispatchPending)
             {
                 var graceSeconds = Math.Clamp(_options.DispatchGraceSeconds, 5, 3600);
-                if (_timeProvider.GetUtcNow() < request.RequestedAtUtc.AddSeconds(graceSeconds))
+                if (_timeProvider.GetUtcNow() < request.UpdatedAtUtc.AddSeconds(graceSeconds))
                     return;
+                await ReplayDispatchAsync(request, cancellationToken);
+                return;
             }
             await _store.UpdateAsync(request with
             {
                 State = DirectMusicRequestState.Failed,
-                FailureCategory = request.State == DirectMusicRequestState.DispatchPending
-                    ? "QueueRejected"
-                    : "TransferMissing",
+                FailureCategory = "TransferMissing",
             }, cancellationToken);
             return;
         }
         if (!status.TransferId.HasValue ||
             (request.TransferId.HasValue && request.TransferId.Value != status.TransferId.Value) ||
+            status.Username != request.Username ||
+            status.Filename != request.RemoteFilename ||
             status.Size != request.ExpectedSize ||
             status.BytesTransferred < 0 ||
             status.BytesTransferred > request.ExpectedSize)
@@ -149,6 +154,58 @@ public sealed class DirectMusicRequestStatusProcessor : IDirectMusicRequestStatu
                 throw new InvalidDataException("The Soulseek batch state is invalid.");
         }
     }
+
+    private async Task ReplayDispatchAsync(
+        DirectMusicRequestStatusDTO request,
+        CancellationToken cancellationToken)
+    {
+        var track = new SoulseekTrackSearchResult(
+            request.SearchId,
+            request.Username,
+            request.RemoteFilename,
+            request.ExpectedSize,
+            request.TrackTitle,
+            request.ArtistName,
+            request.ExpectedDuration,
+            string.Empty,
+            false,
+            0,
+            0);
+        var response = await _soulseekDispatcher.QueueDownloadAsync(track, request.BatchId, cancellationToken);
+        if (response.Success && response.Data is not null && ReceiptMatches(response.Data, request))
+        {
+            await _store.UpdateAsync(request with
+            {
+                State = DirectMusicRequestState.Queued,
+                TransferId = response.Data.TransferId,
+            }, cancellationToken);
+            return;
+        }
+
+        if (IsDefinitiveQueueRejection(response.StatusCode))
+        {
+            await _store.UpdateAsync(request with
+            {
+                State = DirectMusicRequestState.Failed,
+                FailureCategory = "QueueRejected",
+            }, cancellationToken);
+            return;
+        }
+
+        await _store.UpdateAsync(request, cancellationToken);
+    }
+
+    private static bool ReceiptMatches(
+        SoulseekDownloadReceiptDTO receipt,
+        DirectMusicRequestStatusDTO request) =>
+        receipt.BatchId == request.BatchId &&
+        receipt.TransferId != Guid.Empty &&
+        receipt.Username == request.Username &&
+        receipt.Filename == request.RemoteFilename &&
+        receipt.Size == request.ExpectedSize;
+
+    private static bool IsDefinitiveQueueRejection(int statusCode) =>
+        statusCode is 400 or 403 or 404;
 
     private async Task ProbePlexAsync(
         DirectMusicRequestStatusDTO request,
