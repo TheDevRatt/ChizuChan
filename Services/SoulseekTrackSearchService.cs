@@ -191,12 +191,18 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         endedAt.ValueKind == JsonValueKind.String &&
         endedAt.TryGetDateTimeOffset(out _);
 
-    public async Task<StandardResponse<bool>> QueueDownloadAsync(
+    public Task<StandardResponse<SoulseekDownloadReceiptDTO>> QueueDownloadAsync(
         SoulseekTrackSearchResult track,
+        CancellationToken cancellationToken) =>
+        QueueDownloadAsync(track, Guid.NewGuid(), cancellationToken);
+
+    public async Task<StandardResponse<SoulseekDownloadReceiptDTO>> QueueDownloadAsync(
+        SoulseekTrackSearchResult track,
+        Guid batchId,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(track);
-        if (!TryGetEndpoint(out var endpoint) || string.IsNullOrWhiteSpace(_options.ApiKey) ||
+        if (batchId == Guid.Empty || !TryGetEndpoint(out var endpoint) || string.IsNullOrWhiteSpace(_options.ApiKey) ||
             track.SearchId == Guid.Empty || !IsSafeUsername(track.Username) ||
             !IsSafeFilename(track.Filename) || track.Size <= 0)
         {
@@ -209,6 +215,7 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
         request.Content = JsonContent.Create(new
         {
+            id = batchId,
             username = track.Username,
             searchId = track.SearchId,
             files = new[] { new { filename = track.Filename, size = track.Size } },
@@ -222,15 +229,24 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
             using var response = await _httpClientFactory.CreateClient(nameof(SoulseekTrackSearchService))
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (response.StatusCode == HttpStatusCode.Created)
-                return StandardResponse<bool>.SuccessResponse(true, (int)response.StatusCode);
+            {
+                using var document = await ReadBoundedJsonAsync(response.Content, timeout.Token);
+                if (TryCreateBatchReceipt(document.RootElement, batchId, track, out var receipt))
+                {
+                    return StandardResponse<SoulseekDownloadReceiptDTO>.SuccessResponse(
+                        receipt,
+                        (int)response.StatusCode);
+                }
+            }
 
             if (response.StatusCode is HttpStatusCode.OK or HttpStatusCode.MultiStatus)
             {
                 using var document = await ReadBoundedJsonAsync(response.Content, timeout.Token);
-                if (document.RootElement.TryGetProperty("failures", out var failures) &&
-                    failures.ValueKind == JsonValueKind.Array && failures.GetArrayLength() == 0)
+                if (TryCreateBatchReceipt(document.RootElement, batchId, track, out var receipt))
                 {
-                    return StandardResponse<bool>.SuccessResponse(true, (int)response.StatusCode);
+                    return StandardResponse<SoulseekDownloadReceiptDTO>.SuccessResponse(
+                        receipt,
+                        (int)response.StatusCode);
                 }
             }
 
@@ -244,6 +260,59 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         {
             return QueueUnavailable();
         }
+    }
+
+    private static bool TryCreateBatchReceipt(
+        JsonElement root,
+        Guid batchId,
+        SoulseekTrackSearchResult track,
+        out SoulseekDownloadReceiptDTO receipt)
+    {
+        receipt = null!;
+        if (!root.TryGetProperty("batch", out var batch) ||
+            batch.ValueKind != JsonValueKind.Object ||
+            !batch.TryGetProperty("id", out var id) ||
+            !id.TryGetGuid(out var returnedBatchId) ||
+            returnedBatchId != batchId ||
+            !batch.TryGetProperty("username", out var batchUsername) ||
+            batchUsername.GetString() != track.Username ||
+            !batch.TryGetProperty("transfers", out var transfers) ||
+            transfers.ValueKind != JsonValueKind.Array ||
+            transfers.GetArrayLength() != 1 ||
+            !root.TryGetProperty("failures", out var failures) ||
+            failures.ValueKind != JsonValueKind.Array ||
+            failures.GetArrayLength() != 0)
+        {
+            return false;
+        }
+
+        var transfer = transfers[0];
+        if (transfer.ValueKind != JsonValueKind.Object ||
+            !transfer.TryGetProperty("id", out var transferIdElement) ||
+            !transferIdElement.TryGetGuid(out var transferId) ||
+            transferId == Guid.Empty ||
+            !transfer.TryGetProperty("batchId", out var transferBatchId) ||
+            !transferBatchId.TryGetGuid(out var returnedTransferBatchId) ||
+            returnedTransferBatchId != batchId ||
+            !transfer.TryGetProperty("username", out var transferUsername) ||
+            transferUsername.GetString() != track.Username ||
+            !transfer.TryGetProperty("filename", out var filename) ||
+            filename.GetString() != track.Filename ||
+            !transfer.TryGetProperty("size", out var size) ||
+            !size.TryGetInt64(out var returnedSize) ||
+            returnedSize != track.Size)
+        {
+            return false;
+        }
+
+        receipt = new SoulseekDownloadReceiptDTO(batchId)
+        {
+            TransferId = transferId,
+            Username = track.Username,
+            Filename = track.Filename,
+            Size = track.Size,
+        };
+        return true;
     }
 
     private bool TryGetEndpoint(out Uri endpoint)
@@ -443,8 +512,10 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
     private static StandardResponse<IReadOnlyList<SoulseekTrackSuggestionDTO>> SearchUnavailable(int statusCode = 503) =>
         StandardResponse<IReadOnlyList<SoulseekTrackSuggestionDTO>>.ErrorResponse(
             "Soulseek search is unavailable right now.", statusCode);
-    private static StandardResponse<bool> QueueUnavailable(int statusCode = 503) =>
-        StandardResponse<bool>.ErrorResponse("Couldn't queue that Soulseek track right now.", statusCode);
+    private static StandardResponse<SoulseekDownloadReceiptDTO> QueueUnavailable(int statusCode = 503) =>
+        StandardResponse<SoulseekDownloadReceiptDTO>.ErrorResponse(
+            "Couldn't queue that Soulseek track right now.",
+            statusCode);
 
     private readonly record struct ParsedFile(
         string Filename, long Size, int Length, string Title, string? Artist, string Quality,

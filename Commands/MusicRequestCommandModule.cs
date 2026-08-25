@@ -18,6 +18,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
     private readonly IYouTubeMusicSearchService _youtubeService;
     private readonly IMusicSearchEmbedBuilder _embedBuilder;
     private readonly IMusicRequestNotificationStore _notificationStore;
+    private readonly IDirectMusicRequestStatusStore _directStatusStore;
     private readonly LidarrOptions _options;
     private readonly SoulseekTrackSearchOptions _soulseekOptions;
     private readonly ILogger<MusicRequestCommandModule> _logger;
@@ -30,6 +31,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         IYouTubeMusicSearchService youtubeService,
         IMusicSearchEmbedBuilder embedBuilder,
         IMusicRequestNotificationStore notificationStore,
+        IDirectMusicRequestStatusStore directStatusStore,
         IOptions<LidarrOptions> options,
         IOptions<SoulseekTrackSearchOptions> soulseekOptions,
         ILogger<MusicRequestCommandModule> logger)
@@ -41,6 +43,7 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         _youtubeService = youtubeService;
         _embedBuilder = embedBuilder;
         _notificationStore = notificationStore;
+        _directStatusStore = directStatusStore;
         _options = options.Value;
         _soulseekOptions = soulseekOptions.Value;
         _logger = logger;
@@ -228,6 +231,35 @@ public class MusicRequestCommandModule : ApplicationCommandModule<ApplicationCom
         }
 
         await ModifyResponseAsync(m => m.Content = content);
+    }
+
+    [SlashCommand(
+        "music_status",
+        "Show the status of your recent direct Soulseek requests.",
+        Contexts = [InteractionContextType.BotDMChannel])]
+    public async Task StatusAsync()
+    {
+        await RespondAsync(InteractionCallback.DeferredMessage());
+
+        if (Context.Guild is not null)
+        {
+            await ModifyResponseAsync(message => message.Content = "This command can only be used in DMs.");
+            return;
+        }
+
+        try
+        {
+            var requests = await _directStatusStore.GetRecentForUserAsync(Context.User.Id, 10);
+            var content = MusicRequestStatusFormatter.Build(requests);
+            await ModifyResponseAsync(message => message.Content = content);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                "Direct music status command failed ({ExceptionType}).",
+                exception.GetType().Name);
+            await ModifyResponseAsync(message => message.Content = "Couldn't load your music status right now.");
+        }
     }
 
     private async Task<bool> EnsureAccessAsync(MusicRequestOperation operation)
