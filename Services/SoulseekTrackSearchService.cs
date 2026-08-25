@@ -50,16 +50,17 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         {
             id = searchId,
             searchText = trimmedQuery,
-            searchTimeout = Math.Clamp(_options.SearchTimeoutSeconds, 5, 30) * 1000,
+            searchTimeout = _options.GetSlskdSearchTimeout(),
             responseLimit = Math.Clamp(_options.ResponseLimit, 1, 100),
             fileLimit = Math.Clamp(_options.FileLimit, 1, 500),
             filterResponses = true,
         });
 
+        var preserveServerSearch = false;
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_options.HttpTimeoutSeconds, 5, 60)));
+            timeout.CancelAfter(TimeSpan.FromSeconds(_options.GetEffectiveHttpTimeoutSeconds()));
             using var client = _httpClientFactory.CreateClient(nameof(SoulseekTrackSearchService));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (!response.IsSuccessStatusCode)
@@ -79,8 +80,10 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
             var limit = Math.Clamp(_options.ResultLimit, 1, 5);
             try
             {
-                return StandardResponse<IReadOnlyList<SoulseekTrackSuggestionDTO>>.SuccessResponse(
+                var result = StandardResponse<IReadOnlyList<SoulseekTrackSuggestionDTO>>.SuccessResponse(
                     ParseResults(document.RootElement, searchId, trimmedQuery, limit));
+                preserveServerSearch = true;
+                return result;
             }
             finally
             {
@@ -94,6 +97,32 @@ public sealed partial class SoulseekTrackSearchService : ISoulseekTrackSearchSer
         catch (Exception)
         {
             return SearchUnavailable();
+        }
+        finally
+        {
+            if (!preserveServerSearch)
+                await TryCancelSearchAsync(endpoint, searchId);
+        }
+    }
+
+    private async Task TryCancelSearchAsync(Uri endpoint, Guid searchId)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            using var request = new HttpRequestMessage(
+                HttpMethod.Put,
+                new Uri(endpoint, $"/api/v0/searches/{searchId:D}"));
+            request.Headers.TryAddWithoutValidation("X-API-Key", _options.ApiKey);
+            using var client = _httpClientFactory.CreateClient(nameof(SoulseekTrackSearchService));
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeout.Token);
+        }
+        catch (Exception)
+        {
+            // Best-effort cleanup must not replace the original search result or cancellation.
         }
     }
 
