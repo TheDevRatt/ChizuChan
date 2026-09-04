@@ -18,6 +18,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="libsodium" Version="1.0.20.1" />
     <PackageReference Include="Whisper.net" Version="1.8.0" />

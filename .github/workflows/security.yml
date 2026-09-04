@@ -16,3 +16,13 @@ jobs:
         run: python3 -m unittest discover -s scripts -p "test_*.py"
       - name: Verify tracked files contain no credentials
         run: python3 scripts/verify_no_secrets.py
+
+  youtube-download-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5.4.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Run YouTube download tests
+        run: dotnet test tests/ChizuChan.YouTubeDownload.Tests/ChizuChan.YouTubeDownload.Tests.csproj --configuration Release --verbosity minimal
