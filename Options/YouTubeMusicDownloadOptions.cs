@@ -21,18 +21,27 @@ public sealed class YouTubeMusicDownloadOptions
     public string LibraryRootPath { get; set; } = "";
     public string? YtDlpPath { get; set; }
     public string? FfmpegPath { get; set; }
-    public int MaxDurationSeconds { get; set; } = 900;
-    public int DownloadTimeoutSeconds { get; set; } = 300;
-    public long MaxFileSizeBytes { get; set; } = 100 * 1024 * 1024;
+    /// <summary>Optional media duration cap. Zero or negative disables the policy.</summary>
+    public int MaxDurationSeconds { get; set; }
+    /// <summary>Optional per-process elapsed cap. Zero or negative disables it; prefer stalled-work detection.</summary>
+    public int DownloadTimeoutSeconds { get; set; }
+    /// <summary>Optional new-file size cap. Zero or negative disables it. Existing library files are exempt.</summary>
+    public long MaxFileSizeBytes { get; set; }
+    /// <summary>Free-space floor on the actual library volume, not a per-file cap. Zero disables it.</summary>
+    public long MinimumFreeSpaceBytes { get; set; } = 1024L * 1024 * 1024;
+    /// <summary>Seconds with no output, staging file changes or CPU progress. Zero disables detection.</summary>
+    public int StalledWorkTimeoutSeconds { get; set; } = 300;
+    /// <summary>Storage/activity sampling period. Positive values are honored without clamping.</summary>
+    public int ResourceMonitoringIntervalMilliseconds { get; set; } = 1000;
     public int MaxMetadataBytes { get; set; } = 256 * 1024;
     public string Genre { get; set; } = "YouTube";
     public string FallbackAlbum { get; set; } = "Single";
     public string FallbackArtist { get; set; } = "Unknown Artist";
     public string FallbackTitle { get; set; } = "Untitled";
 
-    public int GetMaxDurationSeconds() => Math.Clamp(MaxDurationSeconds, 30, 6 * 60 * 60);
-    public int GetDownloadTimeoutSeconds() => Math.Clamp(DownloadTimeoutSeconds, 10, 60 * 60);
+    public int GetMaxDurationSeconds() => Math.Max(0, MaxDurationSeconds);
+    public int GetDownloadTimeoutSeconds() => Math.Max(0, DownloadTimeoutSeconds);
     public int GetRootLockTimeoutSeconds() => Math.Clamp(RootLockTimeoutSeconds, 1, 5 * 60);
-    public long GetMaxFileSizeBytes() => Math.Clamp(MaxFileSizeBytes, 1024 * 1024, 1024L * 1024 * 1024);
+    public long GetMaxFileSizeBytes() => Math.Max(0, MaxFileSizeBytes);
     public int GetMaxMetadataBytes() => Math.Clamp(MaxMetadataBytes, 4 * 1024, 1024 * 1024);
 }

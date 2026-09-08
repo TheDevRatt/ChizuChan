@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" PrivateAssets="all" />
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../Options/YouTubeMusicDownloadOptions.cs" Link="Source/YouTubeMusicDownloadOptions.cs" />
+    <Compile Include="../../Services/YouTubeMusicActionHandler.cs" Link="Source/YouTubeMusicActionHandler.cs" />
+    <Compile Include="../../Services/YouTubeDownloadTool.cs" Link="Source/YouTubeDownloadTool.cs" />
+    <Compile Include="../../Services/YouTubeMusicPathPolicy.cs" Link="Source/YouTubeMusicPathPolicy.cs" />
+    <Compile Include="../../Services/YtDlpSearchRunner.cs" Link="Source/YtDlpSearchRunner.cs" />
+    <Compile Include="../../Services/YouTubeLongMedia*.cs" Link="Source/%(Filename)%(Extension)" />
+    <Compile Include="../../Services/Interfaces/IYouTubeDownloadTool.cs" Link="Source/IYouTubeDownloadTool.cs" />
+    <Compile Include="../../Services/Interfaces/IYouTubeMusicActionHandler.cs" Link="Source/IYouTubeMusicActionHandler.cs" />
+    <Compile Include="../../Services/Interfaces/IYtDlpSearchRunner.cs" Link="Source/IYtDlpSearchRunner.cs" />
+    <None Include="../../appsettings.example.json" Link="appsettings.example.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
