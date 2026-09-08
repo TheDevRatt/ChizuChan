@@ -85,11 +85,31 @@ namespace ChizuChan
                 (ILidarrCompletionReader)sp.GetRequiredService<ILidarrService>());
             builder.Services.AddHostedService<StatusRotatorService>();
             builder.Services.AddHostedService<MusicRequestCompletionWorker>();
+            AddYouTubeLongMediaDelivery(builder.Services, builder.Configuration);
 
             var host = builder.Build()
                 .AddModules(typeof(Program).Assembly);
 
             await host.RunAsync();
+        }
+
+        /// <summary>Decorate the scanner's acquisition handler once, shared by direct and music-search entry points.</summary>
+        public static void AddYouTubeLongMediaDelivery(IServiceCollection services, IConfiguration configuration)
+        {
+            var engine = services.Last(descriptor => descriptor.ServiceType == typeof(IYouTubeMusicActionHandler));
+            foreach (var descriptor in services.Where(d => d.ServiceType == typeof(IYouTubeMusicActionHandler)).ToArray())
+                services.Remove(descriptor);
+            services.Configure<YouTubeLongMediaDeliveryOptions>(configuration.GetSection(YouTubeLongMediaDeliveryOptions.SectionName));
+            services.AddSingleton<YouTubeLongMediaStore>();
+            services.AddSingleton<IYouTubeLongMediaMessenger, YouTubeLongMediaMessenger>();
+            services.AddSingleton(sp => new YouTubeLongMediaDelivery(
+                (IYouTubeMusicActionHandler)(engine.ImplementationInstance ?? engine.ImplementationFactory?.Invoke(sp) ??
+                    ActivatorUtilities.CreateInstance(sp, engine.ImplementationType!)),
+                sp.GetRequiredService<YouTubeLongMediaStore>(), sp.GetRequiredService<IYouTubeLongMediaMessenger>(),
+                sp.GetRequiredService<IOptions<YouTubeLongMediaDeliveryOptions>>(),
+                sp.GetRequiredService<ILogger<YouTubeLongMediaDelivery>>()));
+            services.AddSingleton<IYouTubeMusicActionHandler>(sp => sp.GetRequiredService<YouTubeLongMediaDelivery>());
+            services.AddHostedService(sp => sp.GetRequiredService<YouTubeLongMediaDelivery>());
         }
 
         private static void AddMachineLocalSecrets(
