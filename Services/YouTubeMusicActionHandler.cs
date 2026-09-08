@@ -118,7 +118,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             CreateDirectorySafely(root, indexRoot);
             var indexPath = Path.Combine(indexRoot, $"{videoId}.json");
             var indexStatus = TryResolveIndexedDownload(
-                root, indexPath, videoId, _options.GetMaxFileSizeBytes(), out var indexedDestination);
+                root, indexPath, videoId, 0, out var indexedDestination);
             if (indexStatus == IndexReadStatus.Valid && indexedDestination is not null &&
                 await VerifyAudioStreamAsync(ffmpeg, indexedDestination, root, cancellationToken))
             {
@@ -150,13 +150,13 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 "--no-warnings",
                 canonicalUrl,
             };
-            var probe = await _tool.RunAsync(new YouTubeDownloadToolInvocation(
+            var probe = await _tool.RunAsync(ApplyResourcePolicy(new YouTubeDownloadToolInvocation(
                 ytDlp,
                 probeArguments,
                 stagingDirectory,
                 timeout,
                 metadataLimit,
-                MaximumToolErrorCharacters), cancellationToken);
+                MaximumToolErrorCharacters), metadata: true), cancellationToken);
             if (probe.ExitCode != 0)
                 return SafeFailure();
 
@@ -183,17 +183,19 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 ffmpeg,
                 _options.GetMaxDurationSeconds(),
                 maxFileSize);
-            var download = await _tool.RunAsync(new YouTubeDownloadToolInvocation(
+            var download = await _tool.RunAsync(ApplyResourcePolicy(new YouTubeDownloadToolInvocation(
                 ytDlp,
                 downloadArguments,
                 stagingDirectory,
                 timeout,
                 64 * 1024,
-                MaximumToolErrorCharacters), cancellationToken);
+                MaximumToolErrorCharacters)), cancellationToken);
             if (download.ExitCode != 0)
                 return SafeFailure();
 
             var audioPath = Path.Combine(stagingDirectory, "download.m4a");
+            if (ExceedsFileSizePolicy(audioPath, maxFileSize))
+                return YouTubeMusicActionResult.Failed("The download exceeds the operator-configured file size limit.");
             if (!IsValidM4a(audioPath, maxFileSize))
                 return SafeFailure();
 
@@ -201,18 +203,21 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             var finalStagedPath = Path.Combine(stagingDirectory, $"final-{Guid.NewGuid():N}.m4a");
             var ffmpegArguments = BuildFfmpegArguments(
                 audioPath, coverPath, finalStagedPath, metadata, canonicalUrl);
-            var tag = await _tool.RunAsync(new YouTubeDownloadToolInvocation(
+            var tag = await _tool.RunAsync(ApplyResourcePolicy(new YouTubeDownloadToolInvocation(
                 ffmpeg,
                 ffmpegArguments,
                 stagingDirectory,
                 timeout,
                 64 * 1024,
-                MaximumToolErrorCharacters), cancellationToken);
+                MaximumToolErrorCharacters)), cancellationToken);
+            if (ExceedsFileSizePolicy(finalStagedPath, maxFileSize))
+                return YouTubeMusicActionResult.Failed("The tagged download exceeds the operator-configured file size limit.");
             if (tag.ExitCode != 0 || !IsValidM4a(finalStagedPath, maxFileSize))
                 return SafeFailure();
-            if (!await VerifyAudioStreamAsync(ffmpeg, finalStagedPath, stagingDirectory, cancellationToken))
-                return SafeFailure();
+            if (!await VerifyAudioStreamAsync(ffmpeg, finalStagedPath, stagingDirectory, cancellationToken, metadata.DurationSeconds))
+                return YouTubeMusicActionResult.Failed("Downloaded audio failed duration or tail verification; no file was imported.");
 
+            cancellationToken.ThrowIfCancellationRequested();
             var destinationDirectory = Path.GetDirectoryName(destination)
                 ?? throw new InvalidOperationException("Destination has no parent directory.");
             CreateDirectorySafely(root, destinationDirectory);
@@ -237,6 +242,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             {
                 // Staging and destination are deliberately below the same configured root, so this
                 // non-overwriting move is an atomic same-volume promotion.
+                cancellationToken.ThrowIfCancellationRequested();
                 File.Move(finalStagedPath, destination, overwrite: false);
             }
             catch (IOException) when (File.Exists(destination))
@@ -258,6 +264,18 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
+        }
+        catch (YouTubeLongMediaLowSpaceException)
+        {
+            return YouTubeMusicActionResult.Failed("The YouTube library has insufficient free space for its configured reserve. No download was imported.");
+        }
+        catch (YouTubeLongMediaStalledException)
+        {
+            return YouTubeMusicActionResult.Failed("The YouTube download stalled without progress and was stopped. Please try again.");
+        }
+        catch (TimeoutException)
+        {
+            return YouTubeMusicActionResult.Failed("The YouTube download exceeded the operator-configured elapsed time limit.");
         }
         catch (RootOperationLockUnavailableException)
         {
@@ -286,17 +304,37 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
     }
 
+    private YouTubeDownloadToolInvocation ApplyResourcePolicy(
+        YouTubeDownloadToolInvocation invocation, bool metadata = false, bool readOnly = false) => invocation with
+    {
+        OutputMode = metadata ? YouTubeDownloadOutputMode.Metadata : YouTubeDownloadOutputMode.Diagnostics,
+        MinimumFreeSpaceBytes = readOnly ? 0 : Math.Max(0, _options.MinimumFreeSpaceBytes),
+        StalledWorkTimeout = TimeSpan.FromSeconds(Math.Max(0, _options.StalledWorkTimeoutSeconds)),
+        MonitoringInterval = TimeSpan.FromMilliseconds(_options.ResourceMonitoringIntervalMilliseconds > 0
+            ? _options.ResourceMonitoringIntervalMilliseconds : 1000),
+    };
+
     public static IReadOnlyList<string> BuildDownloadArguments(
         string canonicalUrl,
         string stagingDirectory,
         string ffmpegPath,
         int maxDurationSeconds,
-        long maxFileSizeBytes) =>
-    [
-        "--ignore-config",
-        "--no-playlist",
-        "--match-filter", $"!is_live & !was_live & duration <= {maxDurationSeconds}",
-        "--max-filesize", maxFileSizeBytes.ToString(CultureInfo.InvariantCulture),
+        long maxFileSizeBytes)
+    {
+        var arguments = new List<string> { "--ignore-config", "--no-playlist" };
+        // Recheck live eligibility at acquisition to handle status changes after the probe.
+        // Separate match filters are OR-ed by yt-dlp. Clauses within each filter are AND-ed.
+        foreach (var status in new[] { "not_live", "was_live" })
+        {
+            var filter = $"!is_live & live_status = {status} & duration > 0";
+            if (maxDurationSeconds > 0)
+                filter += $" & duration <= {maxDurationSeconds.ToString(CultureInfo.InvariantCulture)}";
+            arguments.AddRange(["--match-filter", filter]);
+        }
+        if (maxFileSizeBytes > 0)
+            arguments.AddRange(["--max-filesize", maxFileSizeBytes.ToString(CultureInfo.InvariantCulture)]);
+        arguments.AddRange([
+        "--format", "bestaudio/best",
         "--extract-audio",
         "--audio-format", "m4a",
         "--audio-quality", "0",
@@ -305,7 +343,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         "--ffmpeg-location", ffmpegPath,
         "--output", Path.Combine(stagingDirectory, "download.%(ext)s"),
         canonicalUrl,
-    ];
+        ]);
+        return arguments;
+    }
 
     public static IReadOnlyList<string> BuildFfmpegArguments(
         string audioPath,
@@ -314,7 +354,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         YouTubeTrackMetadata metadata,
         string canonicalUrl)
     {
-        var arguments = new List<string> { "-nostdin", "-hide_banner", "-loglevel", "error", "-n", "-i", audioPath };
+        var arguments = new List<string> { "-nostdin", "-hide_banner", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-n", "-i", audioPath };
         if (coverPath is not null)
             arguments.AddRange(["-i", coverPath]);
 
@@ -327,9 +367,13 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 "-disposition:v:0", "attached_pic",
             ]);
         }
+        else
+        {
+            // Retain an existing attached image when no replacement thumbnail was acquired.
+            arguments.AddRange(["-map", "0:v?", "-c:v", "copy", "-disposition:v:0", "attached_pic"]);
+        }
         arguments.AddRange([
-            "-c:a", "aac",
-            "-b:a", "256k",
+            "-c:a", "copy",
             "-movflags", "+faststart",
             "-metadata", $"title={metadata.Title}",
             "-metadata", $"artist={metadata.Artist}",
@@ -357,7 +401,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         "-xerror",
         "-i", mediaPath,
         "-map", "0:a:0",
-        "-t", "1",
+        "-progress", "pipe:1",
+        "-nostats",
         "-f", "null",
         OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
     ];
@@ -366,19 +411,30 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         string ffmpegPath,
         string mediaPath,
         string workingDirectory,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        double? expectedDuration = null)
     {
-        if (!IsValidM4a(mediaPath, _options.GetMaxFileSizeBytes()))
+        // Admission policies never invalidate an existing library item.
+        if (!IsValidM4a(mediaPath, 0))
             return false;
 
-        var result = await _tool.RunAsync(new YouTubeDownloadToolInvocation(
+        var result = await _tool.RunAsync(ApplyResourcePolicy(new YouTubeDownloadToolInvocation(
             ffmpegPath,
             BuildAudioVerificationArguments(mediaPath),
             workingDirectory,
-            TimeSpan.FromSeconds(Math.Min(30, _options.GetDownloadTimeoutSeconds())),
+            TimeSpan.FromSeconds(_options.GetDownloadTimeoutSeconds()),
             8 * 1024,
-            8 * 1024), cancellationToken);
-        return result.ExitCode == 0 && string.IsNullOrWhiteSpace(result.StandardError);
+            8 * 1024), readOnly: true), cancellationToken);
+        if (result.ExitCode != 0 || !string.IsNullOrWhiteSpace(result.StandardError) ||
+            !result.StandardOutput.Contains("progress=end", StringComparison.Ordinal)) return false;
+        var lastTime = result.StandardOutput.Split('\n')
+            .LastOrDefault(line => line.StartsWith("out_time_us=", StringComparison.Ordinal));
+        if (lastTime is null || !long.TryParse(lastTime[12..].Trim(), NumberStyles.Integer,
+                CultureInfo.InvariantCulture, out var microseconds) || microseconds <= 0) return false;
+        var duration = microseconds / 1_000_000d;
+        // Fixed mux/codec rounding tolerance, not a percentage that hides minutes on long tracks.
+        return expectedDuration is null || Math.Abs(duration - expectedDuration.Value) <= 2;
+
     }
 
     public static bool TryParseMetadata(
@@ -401,6 +457,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return false;
+            if (root.TryGetProperty("_type", out var typeProperty) &&
+                typeProperty.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
+                return false;
             var resultType = GetString(root, "_type");
             if (resultType is not null && !string.Equals(resultType, "video", StringComparison.OrdinalIgnoreCase))
                 return false;
@@ -418,12 +477,16 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             }
             if (!string.Equals(GetString(root, "id"), expectedVideoId, StringComparison.Ordinal))
                 return false;
+            if (!HasValidLiveMetadata(root))
+                return false;
             if (IsLiveOrPremiere(root))
             {
                 rejectionMessage = "Live streams and premieres can't be downloaded.";
                 return false;
             }
-            if (!TryGetDuration(root, out var duration) || duration > options.GetMaxDurationSeconds())
+            if (!TryGetDuration(root, out var duration))
+                return false;
+            if (options.GetMaxDurationSeconds() > 0 && duration > options.GetMaxDurationSeconds())
             {
                 rejectionMessage = "That track is too long to download.";
                 return false;
@@ -460,14 +523,19 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                double.IsFinite(duration) && duration > 0;
     }
 
-    private static bool IsLiveOrPremiere(JsonElement root)
+    private static bool HasValidLiveMetadata(JsonElement root)
     {
-        if (!string.Equals(GetString(root, "live_status"), "not_live", StringComparison.Ordinal))
-            return true;
-        if (root.TryGetProperty("is_live", out var isLive) && isLive.ValueKind == JsonValueKind.True)
-            return true;
-        return root.TryGetProperty("was_live", out var wasLive) && wasLive.ValueKind == JsonValueKind.True;
+        if (GetString(root, "live_status") is null) return false;
+        foreach (var name in new[] { "is_live", "was_live" })
+            if (root.TryGetProperty(name, out var value) &&
+                value.ValueKind is not (JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null))
+                return false;
+        return true;
     }
+
+    private static bool IsLiveOrPremiere(JsonElement root) =>
+        GetString(root, "live_status") is not ("not_live" or "was_live") ||
+        (root.TryGetProperty("is_live", out var isLive) && isLive.ValueKind == JsonValueKind.True);
 
     private static (int? Year, string? Date) ParseDate(JsonElement root)
     {
@@ -523,7 +591,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         foreach (var name in new[] { "download.jpg", "download.jpeg" })
         {
             var path = Path.Combine(stagingDirectory, name);
-            if (IsValidBoundedFile(path, Math.Min(maxFileSize, 20 * 1024 * 1024)))
+            if (IsValidBoundedFile(path, maxFileSize > 0 ? Math.Min(maxFileSize, 20 * 1024 * 1024) : 20 * 1024 * 1024))
                 return path;
         }
         return null;
@@ -852,6 +920,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         }
     }
 
+    private static bool ExceedsFileSizePolicy(string path, long maximumBytes) =>
+        maximumBytes > 0 && File.Exists(path) && new FileInfo(path).Length > maximumBytes;
+
     private static bool IsValidBoundedFile(string path, long maximumBytes)
     {
         try
@@ -871,7 +942,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         try
         {
             var info = new FileInfo(path);
-            if (!info.Exists || info.Length < 16 || info.Length > maximumBytes ||
+            if (!info.Exists || info.Length < 16 || (maximumBytes > 0 && info.Length > maximumBytes) ||
                 (info.Attributes & FileAttributes.ReparsePoint) != 0 ||
                 !string.Equals(info.Extension, ".m4a", StringComparison.OrdinalIgnoreCase))
             {

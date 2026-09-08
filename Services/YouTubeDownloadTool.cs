@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using ChizuChan.Services.Interfaces;
 
 namespace ChizuChan.Services;
@@ -6,17 +7,23 @@ namespace ChizuChan.Services;
 public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
 {
     private static readonly SemaphoreSlim ProcessSlots = new(2, 2);
+    private readonly Func<string, long> _freeSpace;
+
+    public YouTubeDownloadTool() : this(YouTubeLongMediaResourceMonitor.AvailableFreeSpace) { }
+    public YouTubeDownloadTool(Func<string, long> freeSpace) => _freeSpace = freeSpace;
 
     public async Task<YouTubeDownloadToolResult> RunAsync(
         YouTubeDownloadToolInvocation invocation,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(invocation);
+        // Queue waiting is cancelable, but does not spend a process's optional elapsed budget.
+        await ProcessSlots.WaitAsync(cancellationToken);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(invocation.Timeout);
-        await ProcessSlots.WaitAsync(deadline.Token);
         try
         {
+            var monitor = new YouTubeLongMediaResourceMonitor(invocation, _freeSpace);
+            monitor.CheckSpace();
             using var process = new Process
             {
                 StartInfo = CreateStartInfo(invocation),
@@ -33,14 +40,17 @@ public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
                 throw new FileNotFoundException("A required media tool is unavailable.", exception);
             }
 
-            var stdout = YtDlpSearchRunner.ReadBoundedAsync(
+            var stdout = ReadOutputAsync(
                 process.StandardOutput,
                 invocation.MaximumStandardOutputCharacters,
-                deadline.Token);
-            var stderr = YtDlpSearchRunner.ReadBoundedAsync(
+                invocation.OutputMode == YouTubeDownloadOutputMode.Metadata,
+                monitor.Activity, deadline.Token);
+            var stderr = ReadOutputAsync(
                 process.StandardError,
                 invocation.MaximumStandardErrorCharacters,
-                deadline.Token);
+                strict: false,
+                monitor.Activity, deadline.Token);
+            var monitoring = monitor.WatchAsync(process, deadline.Token);
 
             try
             {
@@ -52,21 +62,23 @@ public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
                 };
                 while (pending.Count > 0)
                 {
-                    var completed = await Task.WhenAny(pending);
+                    var completed = await Task.WhenAny(pending.Append(monitoring));
                     await completed;
                     pending.Remove(completed);
                 }
+                monitor.CheckSpace();
                 return new YouTubeDownloadToolResult(process.ExitCode, await stdout, await stderr);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                await StopAndDrainAsync(process, stdout, stderr);
-                throw new TimeoutException("Media tool timed out.");
             }
             catch
             {
+                deadline.Cancel();
                 await StopAndDrainAsync(process, stdout, stderr);
                 throw;
+            }
+            finally
+            {
+                deadline.Cancel();
+                try { await monitoring; } catch { } // Observe cancellation/fault, preserving the original cause.
             }
         }
         finally
@@ -89,6 +101,26 @@ public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
         foreach (var argument in invocation.Arguments)
             startInfo.ArgumentList.Add(argument);
         return startInfo;
+    }
+
+    private static async Task<string> ReadOutputAsync(
+        TextReader reader, int maximumCharacters, bool strict, Action activity, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumCharacters);
+        var retained = new StringBuilder(Math.Min(maximumCharacters, 4096));
+        var buffer = new char[4096];
+        while (true)
+        {
+            var read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (read == 0) return retained.ToString();
+            activity();
+            if (strict && read > maximumCharacters - retained.Length)
+                throw new InvalidDataException("Media metadata output exceeded the allowed size.");
+            var keep = Math.Min(read, maximumCharacters);
+            var remove = Math.Max(0, retained.Length + keep - maximumCharacters);
+            if (remove > 0) retained.Remove(0, remove);
+            retained.Append(buffer, read - keep, keep);
+        }
     }
 
     private static async Task StopAndDrainAsync(

@@ -6,7 +6,20 @@ public sealed record YouTubeDownloadToolInvocation(
     string WorkingDirectory,
     TimeSpan Timeout,
     int MaximumStandardOutputCharacters,
-    int MaximumStandardErrorCharacters);
+    int MaximumStandardErrorCharacters)
+{
+    // Existing six-argument invocations remain strict metadata producers.
+    public YouTubeDownloadOutputMode OutputMode { get; init; } = YouTubeDownloadOutputMode.Metadata;
+    public long MinimumFreeSpaceBytes { get; init; }
+    public TimeSpan StalledWorkTimeout { get; init; }
+    public TimeSpan MonitoringInterval { get; init; } = TimeSpan.FromSeconds(1);
+}
+
+public enum YouTubeDownloadOutputMode
+{
+    Metadata,
+    Diagnostics,
+}
 
 public sealed record YouTubeDownloadToolResult(
     int ExitCode,
