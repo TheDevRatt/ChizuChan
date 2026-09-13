@@ -18,7 +18,7 @@ public sealed class YouTubeLongMediaStore : IDisposable
     {
         _options = options.Value;
         if (!Path.IsPathFullyQualified(_options.StorePath) || _options.MaxPendingJobs < 1 ||
-            _options.MaxStoredJobs < _options.MaxPendingJobs || _options.MaxStoreBytes < 1024 ||
+            _options.MaxStoredJobs < 0 ||
             _options.Concurrency < 1 || _options.Concurrency > _options.MaxPendingJobs ||
             _options.PollIntervalMilliseconds < 1 || _options.DeliveryRetrySeconds < 1)
             throw new ArgumentException("Invalid YouTube delivery storage or resource policy.");
@@ -28,11 +28,9 @@ public sealed class YouTubeLongMediaStore : IDisposable
         {
             if (File.Exists(_options.StorePath))
             {
-                if (new FileInfo(_options.StorePath).Length > _options.MaxStoreBytes)
-                    throw new InvalidDataException("YouTube delivery journal exceeds the configured storage budget.");
                 _jobs = JsonSerializer.Deserialize<List<YouTubeLongMediaJob>>(File.ReadAllBytes(_options.StorePath))
                     ?? throw new InvalidDataException("Invalid YouTube delivery journal.");
-                if (_jobs.Count > _options.MaxStoredJobs || _jobs.Select(j => j.Id).Distinct().Count() != _jobs.Count ||
+                if (_jobs.Select(j => j.Id).Distinct().Count() != _jobs.Count ||
                     _jobs.Any(j => !Regex.IsMatch(j.Id, "\\A[a-f0-9]{24}\\z") || j.OwnerUserId == 0 ||
                         !IsVideoId(j.VideoId) || !Enum.IsDefined(j.State) || j.Message.Length > 1000))
                     throw new InvalidDataException("Invalid YouTube delivery journal records.");
@@ -54,16 +52,12 @@ public sealed class YouTubeLongMediaStore : IDisposable
         {
             // Per-owner identity also joins direct URL and search-card submissions. Never expose another owner's job.
             var existing = _jobs.LastOrDefault(j => j.OwnerUserId == owner && j.VideoId == videoId &&
-                j.State is YouTubeLongMediaState.Queued or YouTubeLongMediaState.Running or YouTubeLongMediaState.Succeeded);
+                j.State is YouTubeLongMediaState.Queued or YouTubeLongMediaState.Running);
             if (existing is not null) return (existing, null);
             if (_jobs.Count(j => !j.IsTerminal) >= _options.MaxPendingJobs)
                 return (null, "The YouTube download queue is busy. Please try again later.");
-            if (_jobs.Count >= _options.MaxStoredJobs)
-                return (null, "YouTube job storage is full. An operator must archive completed records before more jobs can be accepted.");
-            // Reserve 4 KiB per record for a fully escaped 500-character result, IDs, timestamps,
-            // and delivery bookkeeping. A tiny queued record must not consume space needed to finish older jobs.
-            if ((_jobs.Count + 1L) * 4096 + 2 > _options.MaxStoreBytes)
-                return (null, "YouTube job storage budget is exhausted. No download was queued.");
+            // Terminal success is history, not proof that the file still exists. A new explicit
+            // request re-enters the engine, whose locked index check safely avoids duplicate imports.
             var job = new YouTubeLongMediaJob { Id = Guid.NewGuid().ToString("N")[..24], OwnerUserId = owner, VideoId = videoId };
             Persist([.. _jobs, job]);
             return (job, null);
@@ -123,9 +117,12 @@ public sealed class YouTubeLongMediaStore : IDisposable
 
     private void Persist(List<YouTubeLongMediaJob> jobs)
     {
+        // Rotate only acknowledged terminal history. Neither active work nor results awaiting
+        // delivery are disposable, and accumulated history must never deny a new download.
+        var retained = jobs.Where(j => j.IsTerminal && j.DeliveredMessageId is not null)
+            .TakeLast(_options.MaxStoredJobs).Select(j => j.Id).ToHashSet(StringComparer.Ordinal);
+        jobs = jobs.Where(j => !j.IsTerminal || j.DeliveredMessageId is null || retained.Contains(j.Id)).ToList();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(jobs);
-        if (bytes.Length > _options.MaxStoreBytes)
-            throw new IOException("YouTube delivery journal storage budget exhausted.");
         var temp = _options.StorePath + ".tmp";
         try
         {

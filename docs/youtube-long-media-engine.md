@@ -2,54 +2,43 @@
 
 ## Configuration migration
 
-Existing deployments retain explicitly configured old values. Updating code alone does not disable the deployed 900-second duration, 300-second elapsed, or 100-MiB file policies. The release owner must update only these reviewed, nonsecret YouTubeMusicDownload settings in the protected live configuration:
+Code alone does not disable explicitly configured legacy limits. The release owner must update only these allowlisted, nonsecret `YouTubeMusicDownload` fields in the protected live configuration:
 
 ```json
 {
   "MaxDurationSeconds": 0,
   "DownloadTimeoutSeconds": 0,
   "MaxFileSizeBytes": 0,
-  "MinimumFreeSpaceBytes": 1073741824,
   "StalledWorkTimeoutSeconds": 300,
   "ResourceMonitoringIntervalMilliseconds": 1000
 }
 ```
 
-No live settings are changed by this branch. Preserve Enabled, tool locations, exclusive-root policy, library location, secrets and unrelated settings.
+Remove any obsolete `MinimumFreeSpaceBytes` field. It is no longer an application option. No library free-space floor, reserve, staging quota or aggregate media cap exists. Actual filesystem failures are handled, not predicted by an admission policy. Preserve Enabled, tool/library locations, exclusive-root policy, secrets and unrelated settings. This candidate changes no live configuration.
 
-| Setting | Meaning |
-| --- | --- |
-| MaxDurationSeconds | Optional maximum *playback duration*. Default 0. Zero/negative disables the ceiling. Positive values are honored exactly, without the old six-hour clamp. |
-| MaxFileSizeBytes | Optional new acquired/tagged file size ceiling. Default 0. Zero/negative disables it. Positive values are honored exactly, without the old one-GiB clamp. Existing library files are not admission candidates and are never quarantined for exceeding a lowered policy. |
-| DownloadTimeoutSeconds | Optional elapsed ceiling **per child process**, starting after its concurrency slot is acquired. Default 0. Zero/negative disables it. Positive values are not clamped. There is no whole-job elapsed ceiling. Prefer the progress watchdog instead. |
-| MinimumFreeSpaceBytes | Actual free-space floor on the working library volume. Default one GiB of headroom for filesystem metadata, other writers, and writes between samples. This is **not** a maximum media size. Zero/negative disables the floor, which is not recommended. Select headroom for the volume's write rate and other workloads. |
-| StalledWorkTimeoutSeconds | Default 300 seconds without stdout/stderr, top-level staging file size/mtime change, or parent CPU-time advance. Any such activity resets the watchdog. Healthy work can run indefinitely. Zero/negative disables it. A silent stalled process is reported as stalled, not as too-long media. |
-| ResourceMonitoringIntervalMilliseconds | Default 1000 ms. Positive values are honored exactly; nonpositive values use 1000 ms. Shorter intervals reduce storage overshoot but cost more filesystem sampling. |
-
-Storage is checked before starting writers, during work, and after exit. Read-only media verification is exempt from the storage admission floor. No duration-derived size estimate rejects an otherwise finite track. Download, extraction, cover conversion and stream-copy tagging can temporarily occupy multiple files, so plan for more than the final library size. A sampled reserve cannot prevent another writer from consuming the volume between samples and is not a filesystem quota. Do not grant other accounts write access to the dedicated library. Administrators must monitor crash-orphaned staging and quarantine retention; ordinary cancellation/failure cleans the current validated staging directory.
-
-The existing per-root writer lock remains held through cleanup. Its RootLockTimeoutSeconds is a *queue acquisition* budget (30 seconds by default, existing 1..300-second normalization), not a processing cutoff. A process-wide semaphore allows two media child processes. Caller/shutdown cancellation applies while waiting for either an in-memory video lock or a process slot, and during subprocess work. The delivery/job layer owns admission queue bounds and durable Discord lifecycle.
+- Duration, new-file size and per-process elapsed caps default to zero (disabled). Nonpositive values disable them; explicit positive values are honored without hidden upper clamps. There is no whole-job elapsed ceiling. Existing files are exempt from acquisition size policies.
+- StalledWorkTimeoutSeconds defaults to 300. Output, staging file changes, or parent CPU activity reset the watchdog. Healthy work has no default elapsed cutoff. Nonpositive disables stall detection.
+- ResourceMonitoringIntervalMilliseconds defaults to 1000. Positive values are honored; nonpositive values use the default. Sampling tracks activity, never available storage.
+- RootLockTimeoutSeconds remains a queue-lock acquisition budget (default 30, normalized to 1..300), not a processing deadline. The exclusive root lock is held through cleanup. A process-wide semaphore allows two children, and waiting is cancelable without spending a child's optional elapsed budget.
 
 ## Eligibility and acquisition
 
-- Canonical single-video URL, video-id matching, youtube extractor checks, no playlists, ignored local yt-dlp config and ArgumentList/no-shell execution remain in place.
-- Positive finite numeric duration is required. Missing, malformed, zero and nonfinite duration are invalid metadata, not "too long".
-- `not_live` and finite completed `was_live` archives are accepted. Active, upcoming, post-live/not-yet-completed and unknown statuses are rejected. The acquisition filter rechecks these properties to cover status changes after metadata probing.
-- Two yt-dlp match filters implement OR between completed statuses; clauses within each filter are AND-ed. Tests execute the real yt-dlp parser, not just string assertions.
-- Disabled policies do not emit yt-dlp maximum-size or upper-duration filters. Optional positive ceilings appear exactly as configured. Audio-only formats are preferred, with yt-dlp responsible for the required M4A extraction/conversion.
+Canonical single-video URLs, matching video IDs, YouTube extractor checks, no playlists, ignored yt-dlp config and shell-free ArgumentList execution remain mandatory. Positive finite numeric duration is required. Missing, malformed, zero or nonfinite duration is invalid information, not excessive length. Finite completed `was_live` archives are accepted alongside `not_live`. Active, upcoming, post-live/not-yet-finalized and unknown statuses are rejected.
+
+Two yt-dlp match filters OR the accepted statuses; each filter ANDs finite-duration and non-live checks. Disabled caps emit no maximum-size or upper-duration filter. The positive-duration validation is not a maximum duration policy. Tests execute the real pinned yt-dlp parser. Audio acquisition/extraction remains yt-dlp's responsibility.
 
 ## Subprocess and audio contracts
 
-`IYouTubeMusicActionHandler` is unchanged. The six-argument `YouTubeDownloadToolInvocation` constructor remains source-compatible and defaults to `OutputMode = Metadata`. This keeps stdout strictly bounded for existing structured-output callers. `OutputMode = Diagnostics` drains stdout indefinitely, retaining only a bounded tail. Stderr always drains indefinitely with bounded tail retention. Exceeding total progress output is not fatal. MaxMetadataBytes retains its historical **decoded character** unit despite its name, bounded to 4 Ki..1 Mi characters. Handler diagnostic retention is 64 Ki stdout/32 Ki stderr, with 8 Ki per stream during verification; pipe buffers are fixed-size.
+The six-argument invocation constructor defaults to strict Metadata stdout. Diagnostic stdout and all stderr drain continuously with bounded tail retention; total emitted progress is not a fatal event. Metadata retains the historical decoded-character units despite the MaxMetadataBytes name, normalized to 4 Ki..1 Mi characters. Acquisition/tagging retain 64 Ki stdout/32 Ki stderr, verification 8 Ki per stream.
 
-Resource settings are additive init properties on an invocation. The production tool keeps its parameterless constructor; an additional free-space-probe constructor supports deterministic low-disk tests. Consumers linking source instead of the production project must include `Services/YouTubeLongMediaResourceMonitor.cs`.
+Cancellation, failure, stall and explicit elapsed expiry kill the child tree, close pipes and observe cleanup with a two-second teardown budget before releasing the slot. Trusted media tools are required: standard .NET tree termination is not a hostile self-detaching-process sandbox. Linux real-process tests execute; native Windows execution remains a release gate. Windows construction uses ArgumentList, CreateNoWindow and the NUL sink.
 
-On cancellation, failure, stall or explicit elapsed expiry, the runner requests `.Kill(entireProcessTree: true)`, closes redirected pipes and observes cleanup with a two-second teardown budget, then releases the slot. This is standard .NET tree termination, not a hostile-process sandbox. A parent that exits before cleanup can make detached descendants untrackable; a kill-on-close job/container would be needed for hostile self-detaching tools. The tools must be trusted. Windows uses ArgumentList, CreateNoWindow and `NUL` for the null sink. Linux child-tree cancellation is exercised; native Windows runtime execution remains a release verification requirement.
+Tagging uses `-c:a copy`, preserves encoded AAC packet hashes, writes authoritative tags, attaches a replacement cover or retains the existing one. Full verification decodes through EOF using `-xerror` and bounded progress output. Successful new imports require clean diagnostics, `progress=end`, positive decoded duration, and duration within two seconds of authoritative metadata. The fixed rounding tolerance does not grow with track length. Corrupt tails and a short payload falsely advertised as hours long cannot be promoted.
 
-Tagging uses `-c:a copy` on the M4A audio rather than AAC re-encoding. Authoritative title/artist/album/source tags and replacement cover are attached. If no replacement cover exists, an existing cover is retained. Encoded AAC packet SHA-256 hashes are unchanged in real-media tests.
+Legacy indexed media has no stored expected duration, so reuse verifies full decodability and positive duration. A read or verification-tool failure is not evidence of corruption: it must not quarantine an otherwise valid existing file or its index. Managed I/O faults propagate to a safe error; staging is cleaned best-effort. If promotion succeeded but index writing failed, the error acknowledges that a file may already exist and explicit retry checks it safely. Definitively invalid container headers/index data still follow the existing quarantine logic. No already-valid media is overwritten.
 
-Verification decodes the **entire** audio stream through EOF with ffmpeg `-xerror`, using bounded `-progress pipe:1` output. Success requires clean error output, `progress=end`, positive decoded duration, and for new acquisitions a duration within two seconds of authoritative metadata. The fixed tolerance accommodates codec/container rounding and does not grow with media length. This costs one linear decode, not an additional lossy encode, and has no default elapsed cap. Corrupted tails and a three-second audio file advertised as seven hours cannot be promoted. Existing legacy indexed items have no stored expected duration, so reuse checks full decodability and positive duration rather than comparing absent upstream metadata.
+## Integration and release
 
-## Tests and release integration
+CI runs all four tracked projects: command, engine, delivery and regression. See their READMEs for fixture truth and prerequisites. The engine project explicitly source-links only its resource monitor, not all long-media delivery classes. The full production project is also compiled by the other suites.
 
-See `tests/ChizuChan.LongMedia.Engine.Tests/README.md`. This branch does not modify Program.cs, commands, CI or other test projects. Integrate the engine suite into CI together with the independent regression and durable delivery lanes. Run the final integrated Windows Release publish and native Windows subprocess/audio tests before promotion. Never interpret these isolated tests as a reproduced upstream incident or as production deployment verification.
+Local generated-audio and synthetic boundary tests do not establish a live upstream download or deployment. Independent exact-SHA review, native Windows runtime validation and release-owner configuration/deployment verification remain separate gates.

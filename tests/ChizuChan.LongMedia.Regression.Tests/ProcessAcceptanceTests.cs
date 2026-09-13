@@ -74,6 +74,32 @@ public sealed class ProcessAcceptanceTests
         Assert.Contains("progress", result.StandardOutput);
     }
 
+    [Theory]
+    [InlineData("download")]
+    [InlineData("tag")]
+    public async Task Healthy_default_stage_outlives_an_explicit_elapsed_deadline(string stage)
+    {
+        using var scratch = new ScratchDirectory();
+        using var fixture = new PipelineFixture();
+        Assert.True((await fixture.Run()).Success);
+        var template = stage == "download" ? fixture.Tool.Download : fixture.Tool.Tag;
+        var invocation = Child(template, scratch.Path, ["healthy", Path.Combine(scratch.Path, "finished")]) with
+        {
+            MonitoringInterval = TimeSpan.FromMilliseconds(20),
+            StalledWorkTimeout = TimeSpan.FromMilliseconds(600),
+        };
+        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var runner = new YouTubeDownloadTool();
+        await Assert.ThrowsAsync<TimeoutException>(() => runner.RunAsync(
+            invocation with { Timeout = TimeSpan.FromMilliseconds(150) }, safety.Token));
+        Assert.False(File.Exists(Path.Combine(scratch.Path, "finished")));
+        var elapsed = Stopwatch.StartNew();
+        var result = await runner.RunAsync(invocation, safety.Token);
+        Assert.True(elapsed.Elapsed > TimeSpan.FromMilliseconds(150));
+        Assert.Equal(0, result.ExitCode);
+        Assert.True(File.Exists(Path.Combine(scratch.Path, "finished")));
+    }
+
     [Fact]
     public async Task Explicit_deadline_times_out_and_releases_process_slot()
     {

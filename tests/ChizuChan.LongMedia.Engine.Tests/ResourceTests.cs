@@ -12,14 +12,8 @@ public class ResourceTests
         property.SetValue(invocation, value);
         return invocation;
     }
-    private static YouTubeDownloadTool Tool(Func<string, long> freeSpace)
-    {
-        var constructor = typeof(YouTubeDownloadTool).GetConstructor([typeof(Func<string, long>)]);
-        Assert.NotNull(constructor);
-        return (YouTubeDownloadTool)constructor.Invoke([freeSpace]);
-    }
-    private static YouTubeDownloadToolInvocation Monitored(string code, long reserve = 100, double stallSeconds = 0) =>
-        Configure(Configure(Configure(ProcessTests.Child(code, TimeSpan.Zero), "MinimumFreeSpaceBytes", reserve),
+    private static YouTubeDownloadToolInvocation Monitored(string code, double stallSeconds = 0) =>
+        Configure(Configure(ProcessTests.Child(code, TimeSpan.Zero),
             "StalledWorkTimeout", TimeSpan.FromSeconds(stallSeconds)), "MonitoringInterval", TimeSpan.FromMilliseconds(30));
 
     [Fact]
@@ -35,49 +29,26 @@ public class ResourceTests
     }
 
     [Fact]
-    public async Task FinalDiskCheckClassifiesSpaceExhaustionBetweenSamples()
+    public void NoFreeSpaceAdmissionPolicyExists()
     {
-        var reads = 0;
-        var invocation = Monitored("print('OK')") with { MonitoringInterval = TimeSpan.FromSeconds(10) };
-        var error = await Assert.ThrowsAnyAsync<IOException>(() => Tool(_ => Interlocked.Increment(ref reads) < 3 ? 200 : 99).RunAsync(invocation, default));
-        Assert.Contains("free space", error.Message);
-    }
-
-    [Fact]
-    public async Task LowSpaceDenialHappensBeforeProcessStart()
-    {
-        var marker = Path.Combine(Path.GetTempPath(), Guid.NewGuid()+".marker");
-        try
-        {
-            var error = await Assert.ThrowsAnyAsync<IOException>(() => Tool(_ => 99).RunAsync(Monitored($"open({System.Text.Json.JsonSerializer.Serialize(marker)},'w').write('started')"), default));
-            Assert.Contains("free space", error.Message);
-            Assert.False(File.Exists(marker));
-        }
-        finally { File.Delete(marker); }
-    }
-
-    [Fact]
-    public async Task LiveSpaceDropStopsChildAndReleasesSlot()
-    {
-        var reads = 0;
-        var tool = Tool(_ => Interlocked.Increment(ref reads) < 4 ? 200 : 99);
-        var error = await Assert.ThrowsAnyAsync<IOException>(() => tool.RunAsync(Monitored("import time; time.sleep(60)"), default));
-        Assert.Contains("free space", error.Message);
-        Assert.True(reads >= 4);
-        Assert.Equal(0, (await Tool(_ => 200).RunAsync(Monitored("print('OK')"), default)).ExitCode);
+        Assert.Null(typeof(YouTubeDownloadToolInvocation).GetProperty("MinimumFreeSpaceBytes"));
+        Assert.Null(typeof(ChizuChan.Options.YouTubeMusicDownloadOptions).GetProperty("MinimumFreeSpaceBytes"));
+        Assert.Null(typeof(YouTubeDownloadTool).GetConstructor([typeof(Func<string, long>)]));
+        var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "appsettings.example.json"));
+        Assert.DoesNotContain("MinimumFreeSpaceBytes", source);
     }
 
     [Fact]
     public async Task SilentIdleWorkIsClassifiedAsStalledNotElapsedTimeout()
     {
-        var error = await Assert.ThrowsAnyAsync<TimeoutException>(() => Tool(_ => 200).RunAsync(Monitored("import time; time.sleep(60)", stallSeconds: .25), default));
+        var error = await Assert.ThrowsAnyAsync<TimeoutException>(() => new YouTubeDownloadTool().RunAsync(Monitored("import time; time.sleep(60)", stallSeconds: .25), default));
         Assert.Contains("stalled", error.Message);
     }
 
     [Fact]
     public async Task HealthyProgressOutlivesStallWindow()
     {
-        var result = await Tool(_ => 200).RunAsync(Monitored("import time; [(print(i,flush=True), time.sleep(.08)) for i in range(12)]", stallSeconds: .4), default);
+        var result = await new YouTubeDownloadTool().RunAsync(Monitored("import time; [(print(i,flush=True), time.sleep(.08)) for i in range(12)]", stallSeconds: .4), default);
         Assert.Equal(0, result.ExitCode);
     }
 
@@ -89,7 +60,7 @@ public class ResourceTests
         try
         {
             var invocation = Monitored("import time; f=open('growing.part','wb',buffering=0); [(f.write(b'x'),time.sleep(.08)) for i in range(12)]", stallSeconds: .4) with { WorkingDirectory = dir };
-            Assert.Equal(0, (await Tool(_ => 200).RunAsync(invocation, default)).ExitCode);
+            Assert.Equal(0, (await new YouTubeDownloadTool().RunAsync(invocation, default)).ExitCode);
         }
         finally { Directory.Delete(dir, true); }
     }

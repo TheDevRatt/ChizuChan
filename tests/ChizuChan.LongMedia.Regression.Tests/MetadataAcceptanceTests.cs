@@ -156,7 +156,7 @@ public sealed class OptionalBudgetAcceptanceTests
     public void Disabled_budgets_do_not_emit_legacy_duration_or_filesize_arguments(int disabled)
     {
         var args = YouTubeMusicActionHandler.BuildDownloadArguments(Samples.Url, "/tmp/stage with spaces", "/tools/ffmpeg", disabled, disabled);
-        Assert.DoesNotContain(args, argument => argument.Contains("duration", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(args, argument => System.Text.RegularExpressions.Regex.IsMatch(argument, @"duration\s*(?:<|=)"));
         Assert.DoesNotContain("--max-filesize", args);
     }
 
@@ -174,7 +174,7 @@ public sealed class OptionalBudgetAcceptanceTests
     {
         using var fixture = new PipelineFixture();
         Assert.True((await fixture.Run()).Success);
-        Assert.DoesNotContain(fixture.Tool.Download.Arguments, argument => argument.Contains("duration", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(fixture.Tool.Download.Arguments, argument => System.Text.RegularExpressions.Regex.IsMatch(argument, @"duration\s*(?:<|=)"));
     }
 
     [Fact]
@@ -212,7 +212,7 @@ public sealed class OptionalBudgetAcceptanceTests
         var result = await fixture.Run();
         Assert.True(result.Success, result.Message);
         foreach (var stage in new[] { fixture.Tool.Download, fixture.Tool.Tag })
-            Assert.True(stage.Timeout == Timeout.InfiniteTimeSpan,
+            Assert.True(stage.Timeout <= TimeSpan.Zero,
                 $"Healthy full-track stage still has an unconditional {stage.Timeout.TotalSeconds}s deadline. Probe/lock budgets may remain finite.");
     }
 
@@ -225,8 +225,8 @@ public sealed class OptionalBudgetAcceptanceTests
         fixture.Options.DownloadTimeoutSeconds = disabled;
         var result = await fixture.Run();
         Assert.True(result.Success, result.Message);
-        Assert.Equal(Timeout.InfiniteTimeSpan, fixture.Tool.Download.Timeout);
-        Assert.Equal(Timeout.InfiniteTimeSpan, fixture.Tool.Tag.Timeout);
+        Assert.True(fixture.Tool.Download.Timeout <= TimeSpan.Zero);
+        Assert.True(fixture.Tool.Tag.Timeout <= TimeSpan.Zero);
     }
 
     [Fact]

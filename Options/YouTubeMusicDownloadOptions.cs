@@ -27,11 +27,9 @@ public sealed class YouTubeMusicDownloadOptions
     public int DownloadTimeoutSeconds { get; set; }
     /// <summary>Optional new-file size cap. Zero or negative disables it. Existing library files are exempt.</summary>
     public long MaxFileSizeBytes { get; set; }
-    /// <summary>Free-space floor on the actual library volume, not a per-file cap. Zero disables it.</summary>
-    public long MinimumFreeSpaceBytes { get; set; } = 1024L * 1024 * 1024;
     /// <summary>Seconds with no output, staging file changes or CPU progress. Zero disables detection.</summary>
     public int StalledWorkTimeoutSeconds { get; set; } = 300;
-    /// <summary>Storage/activity sampling period. Positive values are honored without clamping.</summary>
+    /// <summary>Activity sampling period. Positive values are honored without clamping.</summary>
     public int ResourceMonitoringIntervalMilliseconds { get; set; } = 1000;
     public int MaxMetadataBytes { get; set; } = 256 * 1024;
     public string Genre { get; set; } = "YouTube";

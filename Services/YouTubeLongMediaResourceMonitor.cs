@@ -3,11 +3,6 @@ using ChizuChan.Services.Interfaces;
 
 namespace ChizuChan.Services;
 
-public sealed class YouTubeLongMediaLowSpaceException : IOException
-{
-    public YouTubeLongMediaLowSpaceException() : base("Insufficient free space in the YouTube library reserve.") { }
-}
-
 public sealed class YouTubeLongMediaStalledException : TimeoutException
 {
     public YouTubeLongMediaStalledException() : base("Media work stalled without output, file changes or CPU progress.") { }
@@ -16,23 +11,14 @@ public sealed class YouTubeLongMediaStalledException : TimeoutException
 internal sealed class YouTubeLongMediaResourceMonitor
 {
     private readonly YouTubeDownloadToolInvocation _invocation;
-    private readonly Func<string, long> _freeSpace;
     private long _lastActivity = Stopwatch.GetTimestamp();
 
-    internal YouTubeLongMediaResourceMonitor(YouTubeDownloadToolInvocation invocation, Func<string, long> freeSpace)
+    internal YouTubeLongMediaResourceMonitor(YouTubeDownloadToolInvocation invocation)
     {
         _invocation = invocation;
-        _freeSpace = freeSpace;
     }
 
     internal void Activity() => Interlocked.Exchange(ref _lastActivity, Stopwatch.GetTimestamp());
-
-    internal void CheckSpace()
-    {
-        if (_invocation.MinimumFreeSpaceBytes > 0 &&
-            _freeSpace(_invocation.WorkingDirectory) < _invocation.MinimumFreeSpaceBytes)
-            throw new YouTubeLongMediaLowSpaceException();
-    }
 
     internal async Task WatchAsync(Process process, CancellationToken cancellationToken)
     {
@@ -44,7 +30,6 @@ internal sealed class YouTubeLongMediaResourceMonitor
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CheckSpace();
             var currentFiles = FileActivity();
             process.Refresh();
             var currentCpu = process.TotalProcessorTime;
@@ -77,10 +62,4 @@ internal sealed class YouTubeLongMediaResourceMonitor
         return (bytes, changes);
     }
 
-    internal static long AvailableFreeSpace(string path)
-    {
-        // DriveInfo accepts directory paths on Unix (statvfs), and drive/UNC roots on Windows.
-        return new DriveInfo(OperatingSystem.IsWindows() ? Path.GetPathRoot(Path.GetFullPath(path))! : path)
-            .AvailableFreeSpace;
-    }
 }

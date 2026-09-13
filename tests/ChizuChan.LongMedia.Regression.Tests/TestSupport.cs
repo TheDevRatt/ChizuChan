@@ -118,7 +118,12 @@ internal sealed class SyntheticAcquisitionTool(string root) : IYouTubeDownloadTo
             if (FailTag) return Task.FromResult(new YouTubeDownloadToolResult(1, "", "synthetic tag failure"));
             Samples.WriteSparseContainerHeader(args[^1], FinalBytes);
         }
-        else if (!args.Contains("null"))
+        else if (args.Contains("null"))
+        {
+            var micros = checked((long)(Metadata["duration"]!.GetValue<double>() * 1_000_000));
+            return Task.FromResult(new YouTubeDownloadToolResult(0, $"out_time_us={micros}\nprogress=end\n", ""));
+        }
+        else
             throw new InvalidOperationException("Unknown tool stage. Update only the test adapter for a candidate's real verification API: " + string.Join(' ', args));
         return Task.FromResult(new YouTubeDownloadToolResult(0, "", ""));
     }

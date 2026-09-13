@@ -265,10 +265,6 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         {
             throw;
         }
-        catch (YouTubeLongMediaLowSpaceException)
-        {
-            return YouTubeMusicActionResult.Failed("The YouTube library has insufficient free space for its configured reserve. No download was imported.");
-        }
         catch (YouTubeLongMediaStalledException)
         {
             return YouTubeMusicActionResult.Failed("The YouTube download stalled without progress and was stopped. Please try again.");
@@ -280,6 +276,11 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
         catch (RootOperationLockUnavailableException)
         {
             return YouTubeMusicActionResult.Failed("The YouTube music library is busy. Please try again shortly.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            LogSafe(exception, "media-io");
+            return YouTubeMusicActionResult.Failed("Media I/O or verification failed. A file may already have imported; retry to check the library.");
         }
         catch (Exception exception)
         {
@@ -305,10 +306,9 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
     }
 
     private YouTubeDownloadToolInvocation ApplyResourcePolicy(
-        YouTubeDownloadToolInvocation invocation, bool metadata = false, bool readOnly = false) => invocation with
+        YouTubeDownloadToolInvocation invocation, bool metadata = false) => invocation with
     {
         OutputMode = metadata ? YouTubeDownloadOutputMode.Metadata : YouTubeDownloadOutputMode.Diagnostics,
-        MinimumFreeSpaceBytes = readOnly ? 0 : Math.Max(0, _options.MinimumFreeSpaceBytes),
         StalledWorkTimeout = TimeSpan.FromSeconds(Math.Max(0, _options.StalledWorkTimeoutSeconds)),
         MonitoringInterval = TimeSpan.FromMilliseconds(_options.ResourceMonitoringIntervalMilliseconds > 0
             ? _options.ResourceMonitoringIntervalMilliseconds : 1000),
@@ -424,13 +424,23 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             workingDirectory,
             TimeSpan.FromSeconds(_options.GetDownloadTimeoutSeconds()),
             8 * 1024,
-            8 * 1024), readOnly: true), cancellationToken);
+            8 * 1024)), cancellationToken);
         if (result.ExitCode != 0 || !string.IsNullOrWhiteSpace(result.StandardError) ||
-            !result.StandardOutput.Contains("progress=end", StringComparison.Ordinal)) return false;
+            !result.StandardOutput.Contains("progress=end", StringComparison.Ordinal))
+        {
+            // A failed read/tool is not proof that an existing library item is corrupt.
+            // Preserve it and its index for a later retry instead of quarantining on an I/O fault.
+            if (expectedDuration is null) throw new IOException("Could not verify existing library media.");
+            return false;
+        }
         var lastTime = result.StandardOutput.Split('\n')
             .LastOrDefault(line => line.StartsWith("out_time_us=", StringComparison.Ordinal));
         if (lastTime is null || !long.TryParse(lastTime[12..].Trim(), NumberStyles.Integer,
-                CultureInfo.InvariantCulture, out var microseconds) || microseconds <= 0) return false;
+                CultureInfo.InvariantCulture, out var microseconds) || microseconds <= 0)
+        {
+            if (expectedDuration is null) throw new IOException("Could not measure existing library media.");
+            return false;
+        }
         var duration = microseconds / 1_000_000d;
         // Fixed mux/codec rounding tolerance, not a percentage that hides minutes on long tracks.
         return expectedDuration is null || Math.Abs(duration - expectedDuration.Value) <= 2;
@@ -811,7 +821,7 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
                 return IndexReadStatus.Invalid;
             return IndexReadStatus.Valid;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or
+        catch (Exception exception) when (exception is JsonException or
                                            InvalidOperationException or ArgumentException or OverflowException)
         {
             return IndexReadStatus.Invalid;
@@ -973,7 +983,8 @@ public sealed partial class YouTubeMusicActionHandler : IYouTubeMusicActionHandl
             }
             return false;
         }
-        catch
+        catch (EndOfStreamException) { return false; }
+        catch (Exception exception) when (exception is not (IOException or UnauthorizedAccessException))
         {
             return false;
         }

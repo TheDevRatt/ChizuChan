@@ -13,7 +13,7 @@
     <Compile Include="../../Services/YouTubeDownloadTool.cs" Link="Source/YouTubeDownloadTool.cs" />
     <Compile Include="../../Services/YouTubeMusicPathPolicy.cs" Link="Source/YouTubeMusicPathPolicy.cs" />
     <Compile Include="../../Services/YtDlpSearchRunner.cs" Link="Source/YtDlpSearchRunner.cs" />
-    <Compile Include="../../Services/YouTubeLongMedia*.cs" Link="Source/%(Filename)%(Extension)" />
+    <Compile Include="../../Services/YouTubeLongMediaResourceMonitor.cs" Link="Source/YouTubeLongMediaResourceMonitor.cs" />
     <Compile Include="../../Services/Interfaces/IYouTubeDownloadTool.cs" Link="Source/IYouTubeDownloadTool.cs" />
     <Compile Include="../../Services/Interfaces/IYouTubeMusicActionHandler.cs" Link="Source/IYouTubeMusicActionHandler.cs" />
     <Compile Include="../../Services/Interfaces/IYtDlpSearchRunner.cs" Link="Source/IYtDlpSearchRunner.cs" />

@@ -183,7 +183,7 @@ public sealed class AudioTests : IAsyncLifetime
         Assert.Contains(tool.Invocations, i => i.Arguments.Contains("--print") && i.OutputMode == YouTubeDownloadOutputMode.Metadata);
         Assert.All(tool.Invocations.Where(i => !i.Arguments.Contains("--print")), i => Assert.Equal(YouTubeDownloadOutputMode.Diagnostics, i.OutputMode));
         var acquire = Assert.Single(tool.Invocations, i => i.Arguments.Contains("--extract-audio"));
-        Assert.True(acquire.MinimumFreeSpaceBytes > 0);
+        Assert.Null(acquire.GetType().GetProperty("MinimumFreeSpaceBytes"));
         Assert.True(acquire.StalledWorkTimeout > TimeSpan.Zero);
         Assert.Equal(TimeSpan.Zero, acquire.Timeout);
     }
@@ -224,19 +224,58 @@ public sealed class AudioTests : IAsyncLifetime
 
     [Theory]
     [InlineData(true)] [InlineData(false)]
-    public async Task ResourceFailuresNameTheCauseAndCleanStaging(bool lowSpace)
+    public async Task ResourceFailuresNameTheCauseAndCleanStaging(bool ioFailure)
     {
         var root = Path.Combine(_directory, "library");
-        var result = await Handler(new FailingTool(lowSpace), Settings(root)).HandleAsync(1, PolicyTests.Id);
+        var result = await Handler(new FailingTool(ioFailure), Settings(root)).HandleAsync(1, PolicyTests.Id);
         Assert.False(result.Success);
-        Assert.Contains(lowSpace ? "free space" : "stalled", result.Message);
+        Assert.Contains(ioFailure ? "I/O" : "stalled", result.Message);
         Assert.False(Directory.Exists(Path.Combine(root, ".chizu-staging")));
     }
 
-    private sealed class FailingTool(bool lowSpace) : IYouTubeDownloadTool
+    private sealed class FailingTool(bool ioFailure) : IYouTubeDownloadTool
     {
         public Task<YouTubeDownloadToolResult> RunAsync(YouTubeDownloadToolInvocation invocation, CancellationToken token) =>
-            throw (lowSpace ? (Exception)new YouTubeLongMediaLowSpaceException() : new YouTubeLongMediaStalledException());
+            throw (ioFailure ? (Exception)new IOException("Synthetic OS write failure") : new YouTubeLongMediaStalledException());
+    }
+
+    [Fact]
+    public async Task ActualFilesystemWriteFailureIsTruthfulAndCleansStaging()
+    {
+        var root = Path.Combine(_directory, "library");
+        var tool = new FilesystemWriteFailureTool();
+        var result = await Handler(tool, Settings(root)).HandleAsync(1, PolicyTests.Id);
+        Assert.True(tool.ObservedOsFailure);
+        Assert.False(result.Success);
+        Assert.Contains("I/O", result.Message);
+        Assert.Empty(Directory.GetFiles(root, "*.m4a", SearchOption.AllDirectories));
+        Assert.False(Directory.Exists(Path.Combine(root, ".chizu-staging")));
+    }
+
+    private sealed class FilesystemWriteFailureTool : IYouTubeDownloadTool
+    {
+        public bool ObservedOsFailure { get; private set; }
+        public Task<YouTubeDownloadToolResult> RunAsync(YouTubeDownloadToolInvocation invocation, CancellationToken token)
+        {
+            if (invocation.Arguments.Contains("--print"))
+                return Task.FromResult(new YouTubeDownloadToolResult(0, PolicyTests.Metadata(3), ""));
+            Assert.Contains("--extract-audio", invocation.Arguments);
+            // Linux's full device supplies real ENOSPC without filling a volume. On Windows,
+            // opening the existing staging directory as a file supplies a real denied write.
+            try
+            {
+                using var stream = new FileStream(OperatingSystem.IsLinux() ? "/dev/full" : invocation.WorkingDirectory,
+                    FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                stream.WriteByte(1);
+                stream.Flush();
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                ObservedOsFailure = true;
+                throw;
+            }
+            throw new InvalidOperationException("The real filesystem failure fixture unexpectedly permitted the write.");
+        }
     }
 
     // Only acquisition is substituted. Every audio generation, tagging and verification is real ffmpeg.

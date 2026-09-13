@@ -12,17 +12,18 @@ namespace ChizuChan.LongMedia.Delivery.Tests;
 public class DeliveryPersistenceTests
 {
     [Fact]
-    public void Admission_reserves_journal_space_for_terminal_and_notification_records()
+    public void Legacy_journal_byte_budget_does_not_restrict_admission_or_completion()
     {
         using var disk = new StoreDisk(maxBytes: 1024);
         var result = disk.Store.Admit(42, "abcdefghijk");
-        Assert.Null(result.Job);
-        Assert.Contains("storage", result.Error!, StringComparison.OrdinalIgnoreCase);
-        Assert.Null(disk.Store.GetOwned(42));
+        Assert.NotNull(result.Job);
+        Assert.Null(result.Error);
+        disk.Store.Finish(result.Job.Id, YouTubeLongMediaState.Succeeded, new string('\uffff', 500));
+        Assert.Equal(YouTubeLongMediaState.Succeeded, disk.Store.GetOwned(42)!.State);
     }
 
     [Fact]
-    public void Reserved_record_space_handles_maximally_escaped_results_and_retry_bookkeeping()
+    public void Journal_handles_maximally_escaped_results_and_retry_bookkeeping()
     {
         using var disk = new StoreDisk(maxBytes: 4098);
         var job = disk.Store.Admit(ulong.MaxValue, "abcdefghijk").Job!;
@@ -120,11 +121,13 @@ public class DeliveryPersistenceTests
             var store = second.Provider.GetRequiredService<YouTubeLongMediaStore>();
             Assert.Null(store.NextDelivery(DateTimeOffset.MaxValue));
             Assert.Null(store.ClaimNext());
+            var prior = store.GetOwned(42)!;
             var repeated = await second.Handler.HandleAsync(42, "abcdefghijk");
             Assert.True(repeated.Success);
-            Assert.Contains("already delivered", repeated.Message);
-            Assert.DoesNotContain("I'll DM", repeated.Message);
-            Assert.Single(second.Jobs());
+            Assert.Contains("Queued", repeated.Message);
+            Assert.Contains("I'll DM", repeated.Message);
+            Assert.NotEqual(prior.Id, store.GetOwned(42)!.Id);
+            Assert.Equal(2, second.Jobs().Length);
         }
         finally { Directory.Delete(root, true); }
     }
@@ -155,15 +158,33 @@ public class DeliveryPersistenceTests
     }
 
     [Fact]
-    public void Full_history_is_honest_resource_denial_and_existing_status_remains_available()
+    public void Undelivered_terminal_history_never_blocks_new_work_or_loses_notification()
     {
         using var disk = new StoreDisk(maxStored: 1);
         var job = disk.Store.Admit(42, "abcdefghijk").Job!;
         disk.Store.Finish(job.Id, YouTubeLongMediaState.Succeeded, "Imported.");
-        var denied = disk.Store.Admit(42, "ABCDEFGHI_0");
-        Assert.Null(denied.Job);
-        Assert.Contains("storage", denied.Error!);
+        var accepted = disk.Store.Admit(42, "ABCDEFGHI_0");
+        Assert.NotNull(accepted.Job);
+        Assert.Null(accepted.Error);
         Assert.Equal(YouTubeLongMediaState.Succeeded, disk.Store.GetOwned(42, job.Id)!.State);
+        Assert.Equal(job.Id, disk.Store.NextDelivery(DateTimeOffset.MaxValue)!.Id);
+    }
+
+    [Fact]
+    public void Delivered_history_rotates_automatically_without_manual_journal_edits()
+    {
+        using var disk = new StoreDisk(maxStored: 1);
+        string? firstId = null;
+        for (var i = 0; i < 5; i++)
+        {
+            var job = disk.Store.Admit(42, "abcdefghijk").Job!;
+            Assert.NotNull(job);
+            if (i == 0) firstId = job.Id;
+            disk.Store.Finish(job.Id, YouTubeLongMediaState.Succeeded, "Imported.");
+            disk.Store.RecordDelivery(job.Id, (ulong)(i + 1), DateTimeOffset.UtcNow);
+        }
+        Assert.Null(disk.Store.GetOwned(42, firstId));
+        Assert.Single(JsonSerializer.Deserialize<List<YouTubeLongMediaJob>>(File.ReadAllText(disk.Options.StorePath))!);
     }
 
     [Fact]
@@ -212,7 +233,9 @@ public class DeliveryPersistenceTests
         public readonly YouTubeLongMediaDeliveryOptions Options;
         public StoreDisk(int maxBytes = 16 * 1024 * 1024, int maxStored = 1000)
         {
-            Options = new YouTubeLongMediaDeliveryOptions { StorePath = Path.Combine(_root, "jobs.json"), MaxStoreBytes = maxBytes, MaxStoredJobs = maxStored, MaxPendingJobs = 1 };
+            Options = new YouTubeLongMediaDeliveryOptions { StorePath = Path.Combine(_root, "jobs.json"), MaxStoredJobs = maxStored, MaxPendingJobs = 1 };
+            // Simulate legacy configuration if the removed property still exists on the RED candidate.
+            Options.GetType().GetProperty("MaxStoreBytes")?.SetValue(Options, maxBytes);
             Store = new YouTubeLongMediaStore(Microsoft.Extensions.Options.Options.Create(Options));
         }
         public void Dispose() { Store.Dispose(); Directory.Delete(_root, true); }

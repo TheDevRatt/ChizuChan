@@ -7,11 +7,6 @@ namespace ChizuChan.Services;
 public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
 {
     private static readonly SemaphoreSlim ProcessSlots = new(2, 2);
-    private readonly Func<string, long> _freeSpace;
-
-    public YouTubeDownloadTool() : this(YouTubeLongMediaResourceMonitor.AvailableFreeSpace) { }
-    public YouTubeDownloadTool(Func<string, long> freeSpace) => _freeSpace = freeSpace;
-
     public async Task<YouTubeDownloadToolResult> RunAsync(
         YouTubeDownloadToolInvocation invocation,
         CancellationToken cancellationToken)
@@ -22,8 +17,7 @@ public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
-            var monitor = new YouTubeLongMediaResourceMonitor(invocation, _freeSpace);
-            monitor.CheckSpace();
+            var monitor = new YouTubeLongMediaResourceMonitor(invocation);
             using var process = new Process
             {
                 StartInfo = CreateStartInfo(invocation),
@@ -66,7 +60,6 @@ public sealed class YouTubeDownloadTool : IYouTubeDownloadTool
                     await completed;
                     pending.Remove(completed);
                 }
-                monitor.CheckSpace();
                 return new YouTubeDownloadToolResult(process.ExitCode, await stdout, await stderr);
             }
             catch

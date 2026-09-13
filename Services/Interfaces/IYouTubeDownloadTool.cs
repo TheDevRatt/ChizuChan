@@ -10,7 +10,6 @@ public sealed record YouTubeDownloadToolInvocation(
 {
     // Existing six-argument invocations remain strict metadata producers.
     public YouTubeDownloadOutputMode OutputMode { get; init; } = YouTubeDownloadOutputMode.Metadata;
-    public long MinimumFreeSpaceBytes { get; init; }
     public TimeSpan StalledWorkTimeout { get; init; }
     public TimeSpan MonitoringInterval { get; init; } = TimeSpan.FromSeconds(1);
 }
